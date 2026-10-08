@@ -38,7 +38,22 @@ This is **not** a complete libDaisy compatibility layer, and it doesn't aim to b
 
 ## Status
 
-Early: nothing is implemented yet.
+In progress. TAPE compiles and links against daisycola; the hardware bodies are still stubs.
+
+## Building
+
+daisycola builds against a libDaisy tree, the CHOMPI fork for now. If a CHOMPI checkout sits next
+to daisycola, it is found automatically and the TAPE tests are built too:
+
+```sh
+cmake -B build -G Ninja
+cmake --build build
+ctest --test-dir build
+```
+
+Otherwise point CMake at the trees with `-DDAISYCOLA_CHOMPI_DIR=...` or
+`-DDAISYCOLA_LIBDAISY_DIR=...`. [docs/headers.md](docs/headers.md) lists which libDaisy headers
+daisycola replaces.
 
 ## Forking and contributing
 
