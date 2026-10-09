@@ -3,6 +3,25 @@
 Decisions made while building daisycola, where they differ from the original plan or aren't
 obvious from the code.
 
+## Fewer replacement headers
+
+The plan had daisycola replace every libDaisy header TAPE touches. Most of them only declare
+things, so they are used as they are and daisycola defines the bodies in `src/` (GPIO,
+TimerHandle, TimChannel, I2C, SAI, Audio, UART, MidiUsbTransport, System, Sdmmc,
+FatFSInterface). Only `daisy.h`, `daisy_seed.h`, `daisy_core.h` (an `#include_next` wrapper),
+`dev/sdram.h`, `stm32h7xx.h`, `stm32h7xx_hal.h`, `cmsis_gcc.h` and `Limiter.h` are replaced.
+Headers that libDaisy reaches by relative path (`sys/system.h`, `util/scopedirqblocker.h`,
+`util/FIFO.h`) can't be replaced at all. [headers.md](headers.md) lists each one, along with
+the host snags fixed on the way: the force-included `daisycola/ff_integer.h`, the `f_write`
+wrapper and the DaisySP `DelayLine` overload. Because of that overload, a firmware build must put
+daisycola's include directories before DaisySP's.
+
+## Missing APIs fail loudly
+
+daisycola only implements what CHOMPI firmware uses. Firmware that calls anything else gets a
+link error rather than a body that silently does nothing. The few bodies still left as stubs
+(`src/stub.h`) abort with a message when called.
+
 ## Chips are modelled at the pin level
 
 `dev/sr_4021.h` is used unchanged. The firmware's `ShiftRegister4021::Update()` bit-bangs clock,
@@ -97,6 +116,13 @@ unmapped and ASan counts it as ordinary memory, so daisycola maps the SDRAM and 
 shadow there. The TAPE boot test sets the option through `__asan_default_options`. Without it,
 `Start` warns and firmware that touches raw SDRAM crashes.
 
+The option belongs to the executable, not the library. ASan reads its options when the process
+starts, before `Start` could act, and `__asan_default_options` is one hook per program: if
+daisycola defined it, it would clash with a host's own or silently override it. So a host's ASan
+build defines the hook itself or runs with the environment variable. An opt-in
+`daisycola::asan_sdram` CMake target holding only the hook would be a convenience; it isn't built,
+and the choice waits until CHAMPI has an ASan build.
+
 ## Audio
 
 The audio interrupt takes a block from the input ring, runs it through libDaisy's own conversions
@@ -104,6 +130,13 @@ The audio interrupt takes a block from the input ring, runs it through libDaisy'
 calls the callback, and converts the output back the same way after scaling by `postgain` and
 `output_compensation`. Channels are in the order the callback sees them. For TAPE that is mic,
 unused, aux L, aux R in, and headphones L/R, master L/R out.
+
+Full scale doesn't wrap. In 24-bit two's complement, 1.0 × 2^23 = 0x800000 would read back as
+-1.0, and the first audio test expected that. But `f2s24` clamps to ±`FBIPMAX` (0.999985) before
+scaling, so 1.0 becomes about 8388482. Because daisycola uses libDaisy's own conversions both ways,
+firmware output never goes past ±0.999985 and host input is clipped to the same range. The audio
+tests check that value. Audio buffers are arrays of `kMaxAudioChannels` pointers; a null pointer
+means an unused channel.
 
 Two clocks can raise the interrupt. The internal clock is a timer at the block rate, which is what
 headless runs use. With the host clock, the host's audio thread calls `ProcessAudio`; it raises
@@ -133,6 +166,19 @@ the calling thread. With `UseManualClock(true)` time only moves through `Advance
 firmware delays, which step from one due interrupt to the next. The peripheral tests use this to
 drive TAPE's own code deterministically. Once the firmware has started, the process stays in
 thread mode.
+
+## What TAPE needs to boot headless
+
+TAPE's `MainLoop` waits on the battery charger and its interrupt line. A headless boot
+needs a fake MP2722 at I2C 0x3F with VIN_GD (register 0x12, bit 6) set, `mpc_int` (D31) held high,
+and both CD4021 chains attached with their inputs high. Without those it waits
+forever.
+
+High is the resting level on both chains. The keys are active-low: the fork's `State(i)` is true
+only once the debounce counter has fallen below `dbc_size`, which takes the input held low, and
+TAPE's UI treats `RisingEdge` of `State` as a press. So all-high means no key or encoder button is
+pressed. The encoder chain carries encoders 1–4's A/B lines, which `ChompiEncoder` starts at
+all-high and steps on falling edges, so all-high is also an encoder at rest. `tests/tape/boot_test.cpp` sets this up; it boots in about 1.6 s.
 
 ## Things the plan listed that CHOMPI doesn't use
 
