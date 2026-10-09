@@ -1,8 +1,14 @@
-# daisycola
+# The Daisy Compatibility Layer (daisycola)
 
-**Daisy Compatibility Layer**: a host replacement for the hardware layer of
-[libDaisy](https://github.com/electro-smith/libDaisy), so that firmware written for the
-Electro-Smith Daisy platform can be compiled and run as a normal program on a Linux PC.
+A host replacement for the hardware layer of [libDaisy](https://github.com/electro-smith/libDaisy), 
+so that firmware written for the Electro-Smith Daisy platform can be compiled and run as a normal 
+program on a Linux PC.
+
+## FULL DISCLOSURE
+
+This is a fully vibe coded app. My goal was to get a functional, complete, native Linux virtual [CHOMPI](https://github.com/CHOMPI-Club/CHOMPI),
+not the most efficient, good or secure version of it. I have not reviewed the code. This is provided
+as-is and I make no promises concerning quality or security.
 
 ## What it is
 
