@@ -30,13 +30,19 @@ loads the parallel inputs, a rising clock shifts towards the data pin. The fork'
 code therefore runs as written; nothing is copied. The host wires a chain with `AttachSr4021` and
 sets its inputs with `SetSrInputs`. Input bit *i* is what the firmware reports as index *i*.
 
-## Encoders step by time, not by poll
+## Encoders step by reads and time, not by poll
 
 CHOMPI's `ChompiEncoder` samples its lines at most once per millisecond, and its shift-register
 decoder needs A low for two samples in a row. Stepping one Gray-code state per poll (2 kHz in TAPE)
-would skip states. Instead each state is held for a dwell time (3 ms by default), and the line
-levels are a pure function of the clock and one atomic word the host writes. Reads are lock-free
-and safe from interrupts.
+would skip states. Stepping by time alone skips them too when reads come in bursts: with the host's
+audio clock, the audio callback runs a host period's blocks back to back and then nothing until the
+next period, so a 5 ms period can hide a whole 3 ms state. A skipped state makes TAPE drop the
+detent or count it the wrong way.
+
+So a state steps only once the firmware has read it in two different milliseconds and it has been
+held for a dwell time (3 ms by default). The encoder's whole state, its phase, target and reads, is
+one atomic word: the host's queue and the firmware's reads update it with compare-and-swap, so reads
+stay lock-free and safe from interrupts.
 
 ## WS2812 bits: longer than half a bit is 1
 

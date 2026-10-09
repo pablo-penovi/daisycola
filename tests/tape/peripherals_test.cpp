@@ -187,6 +187,44 @@ TEST_F(Tape, EncoderOnShiftRegisterCountsQueuedDetents)
     EXPECT_EQ(CountIncrements(enc, poll, 80), -3);
 }
 
+TEST_F(Tape, EncoderCountsReadsThatComeInBursts)
+{
+    // With the host's audio clock, TAPE's audio callback runs a host period's blocks back to back
+    // and then nothing until the next period. Each phase must still reach the decoder.
+    const int chain = daisycola::AttachSr4021(seed::D22, seed::D23, seed::D19, 1);
+    ShiftRegister4021<1, 1>         sr;
+    ShiftRegister4021<1, 1>::Config cfg;
+    cfg.clk      = seed::D22;
+    cfg.latch    = seed::D23;
+    cfg.data[0]  = seed::D19;
+    cfg.dbc_size = 50;
+    sr.Init(cfg);
+    chompi::ChompiEncoder enc;
+    enc.Init(Pin(), Pin(), Pin());
+    const EncoderLine a = EncoderLine::OnSr(chain, 0), b = EncoderLine::OnSr(chain, 1);
+
+    for(uint32_t period_us : {2667u, 5333u, 21333u})
+        for(int detents : {5, -5})
+        {
+            daisycola::QueueDetents(a, b, detents);
+            int total = 0;
+            for(int p = 0; p < 100; p++)
+            {
+                // A period's 1 ms blocks, 20 us apart, then the rest of the period.
+                const uint32_t blocks = period_us / 1000;
+                for(uint32_t i = 0; i < blocks; i++)
+                {
+                    sr.Update();
+                    enc.Debounce(sr.RawState(0), sr.RawState(1));
+                    total += enc.Increment();
+                    daisycola::AdvanceClock(20);
+                }
+                daisycola::AdvanceClock(period_us - 20 * blocks);
+            }
+            EXPECT_EQ(total, detents) << "period " << period_us << " us";
+        }
+}
+
 // ---- WS2812 LEDs --------------------------------------------------------------------------------
 
 // TAPE's LedSetup starts the key-LED chain on TIM3 channel 2, and its EndOfLeds callback ping-pongs

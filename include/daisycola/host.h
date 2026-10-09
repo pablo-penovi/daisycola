@@ -122,7 +122,8 @@ uint64_t GetSrInputs(int chain);
 // ---- Quadrature encoders -----------------------------------------------------------------------
 //
 // An encoder's A and B lines can be pins or shift-register inputs. Both rest high. A queued detent
-// steps the lines through one full Gray-code cycle, holding each state for `dwell_us`. A positive
+// steps the lines through one full Gray-code cycle. Each state holds for `dwell_us` and until the
+// firmware has read it in two different milliseconds, so reads in bursts see every state. A positive
 // detent is the direction the firmware's encoder code counts as +1 (B falls before A).
 
 /** One encoder line: a pin, or input `bit` of a CD4021 chain. */
@@ -138,9 +139,9 @@ struct EncoderLine
 
 /** Wires a quadrature encoder to two lines. Returns the encoder's id.
  *
- *  The dwell must cover at least two of the firmware's reads: CHOMPI samples encoders once per
- *  millisecond, and its shift-register decoder needs A low for two samples. The 3 ms default
- *  gives about 80 detents per second. */
+ *  CHOMPI samples encoders once per millisecond, and its shift-register decoder needs A low for
+ *  two samples. The 3 ms default gives about 80 detents per second when the firmware reads every
+ *  millisecond; fewer when its reads are further apart. */
 int AttachEncoder(EncoderLine a, EncoderLine b, uint32_t dwell_us = 3000);
 
 /** Queues detents on an encoder: positive is +1 for the firmware, negative is -1. */

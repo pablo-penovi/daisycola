@@ -52,60 +52,101 @@ void Fail(const char* message)
 
 // ---- Encoders -----------------------------------------------------------------------------------
 //
-// The line levels are a pure function of time and one atomic word the host writes: the phase was
-// p0 at t0 and moves one Gray-code step per dwell towards the target. Reads are lock-free and can
-// happen from interrupts.
+// The lines step through Gray-code phases towards a target the host sets. A phase only steps once
+// the firmware has read it in two different milliseconds and it has been held for the dwell, so
+// reads that come in bursts (audio blocks run back to back on the host's audio thread) see every
+// phase. The whole state is one atomic word: reads are lock-free and can happen from interrupts.
 
 struct Encoder
 {
     EncoderLine           a, b;
     uint32_t              dwell_us;
-    std::atomic<uint64_t> schedule{0}; // t0_us:40 | p0:12 | target:12
+    std::atomic<uint64_t> state{0}; // since_us:24 | read_ms:14 | reads:2 | phase:12 | target:12
 
-    static constexpr uint64_t kTimeMask = (1ull << 40) - 1;
+    // Reads of a phase, in different milliseconds, before it can step. CHOMPI's encoder code
+    // samples its lines at most once a millisecond; its shift-register decoder needs a phase in two
+    // samples in a row.
+    static constexpr int      kMinReads  = 2;
+    static constexpr uint64_t kSinceMask = (1ull << 24) - 1;
+    static constexpr uint64_t kMsMask    = (1ull << 14) - 1;
 
-    static uint64_t Pack(uint64_t t0, int p0, int target)
+    struct State
     {
-        return (t0 & kTimeMask) << 24 | (uint64_t(p0) & 0xfff) << 12 | (uint64_t(target) & 0xfff);
-    }
+        uint64_t since_us; // when the phase started, low 24 bits
+        uint64_t read_ms;  // the millisecond of the last read, low 14 bits
+        int      reads;    // reads of the phase in different milliseconds, up to 3
+        int      phase;
+        int      target;
+    };
+
     static int SignExtend12(uint64_t v) { return int(int16_t(uint16_t(v << 4)) >> 4); }
 
-    int Phase(uint64_t now_us, int* target_out = nullptr) const
+    static uint64_t Pack(const State& st)
     {
-        const uint64_t s      = schedule.load(std::memory_order_acquire);
-        const uint64_t t0     = s >> 24;
-        const int      p0     = SignExtend12(s >> 12);
-        const int      target = SignExtend12(s);
-        if(target_out)
-            *target_out = target;
-        const uint64_t steps = ((now_us - t0) & kTimeMask) / dwell_us;
-        const int      dist  = target - p0;
-        if(uint64_t(dist < 0 ? -dist : dist) <= steps)
-            return target;
-        return dist > 0 ? p0 + int(steps) : p0 - int(steps);
+        return (st.since_us & kSinceMask) << 40 | (st.read_ms & kMsMask) << 26 | uint64_t(st.reads) << 24
+               | (uint64_t(st.phase) & 0xfff) << 12 | (uint64_t(st.target) & 0xfff);
+    }
+
+    static State Unpack(uint64_t s)
+    {
+        return {s >> 40, s >> 26 & kMsMask, int(s >> 24 & 3), SignExtend12(s >> 12), SignExtend12(s)};
+    }
+
+    void Reset(uint64_t now_us) { state.store(Pack({now_us, now_us / 1000, 3, 0, 0})); }
+
+    // The firmware reads the lines: counts the read, steps if the phase is due, and returns the
+    // phase the lines show.
+    int Read(uint64_t now_us)
+    {
+        uint64_t s = state.load(std::memory_order_acquire);
+        for(;;)
+        {
+            State          st = Unpack(s);
+            const uint64_t ms = now_us / 1000 & kMsMask;
+            if(ms == st.read_ms)
+                return st.phase; // counted already; steps only happen on a new millisecond
+            st.read_ms = ms;
+            if(st.phase != st.target && st.reads >= kMinReads
+               && ((now_us - st.since_us) & kSinceMask) >= dwell_us)
+            {
+                st.phase += st.target > st.phase ? 1 : -1;
+                st.since_us = now_us;
+                st.reads    = 1; // this read sees the new phase
+            }
+            else if(st.reads < 3)
+                st.reads++;
+            if(state.compare_exchange_weak(s, Pack(st), std::memory_order_acq_rel))
+                return st.phase;
+        }
     }
 
     // Phase 0..3 = (A,B) (1,1), (1,0), (0,0), (0,1): B falls first going up.
-    bool Level(bool line_b, uint64_t now_us) const
+    bool Level(bool line_b, uint64_t now_us)
     {
-        const int p = Phase(now_us) & 3;
+        const int p = Read(now_us) & 3;
         return line_b ? (p == 0 || p == 3) : (p == 0 || p == 1);
     }
 
-    void Queue(int detents, uint64_t now_us)
+    void Queue(int detents)
     {
-        uint64_t s = schedule.load();
+        uint64_t s = state.load();
         for(;;)
         {
-            int       target = 0;
-            const int now_p  = Phase(now_us, &target);
+            State st = Unpack(s);
             // Keep the 12-bit counters small: the levels only depend on the phase modulo 4.
-            const int shift = now_p / 4 * 4;
-            const uint64_t next
-                = Pack(now_us, now_p - shift, target - shift + 4 * detents);
-            if(schedule.compare_exchange_weak(s, next))
+            const int shift = st.phase / 4 * 4;
+            st.phase -= shift;
+            st.target += 4 * detents - shift;
+            if(state.compare_exchange_weak(s, Pack(st)))
                 return;
         }
+    }
+
+    // Phases left to go.
+    int Left() const
+    {
+        const State st = Unpack(state.load(std::memory_order_acquire));
+        return st.target - st.phase;
     }
 };
 
@@ -362,7 +403,7 @@ int AttachEncoder(EncoderLine a, EncoderLine b, uint32_t dwell_us)
     e.a        = a;
     e.b        = b;
     e.dwell_us = dwell_us;
-    e.schedule.store(Encoder::Pack(NowUs(), 0, 0));
+    e.Reset(NowUs());
     WireLine(a, &e, false);
     WireLine(b, &e, true);
     encoder_count.store(id + 1);
@@ -371,7 +412,7 @@ int AttachEncoder(EncoderLine a, EncoderLine b, uint32_t dwell_us)
 
 void QueueDetents(int encoder, int detents)
 {
-    GetEncoder(encoder).Queue(detents, NowUs());
+    GetEncoder(encoder).Queue(detents);
 }
 
 void QueueDetents(EncoderLine a, EncoderLine b, int detents)
@@ -384,10 +425,7 @@ void QueueDetents(EncoderLine a, EncoderLine b, int detents)
 
 int PendingDetents(int encoder)
 {
-    Encoder&  e      = GetEncoder(encoder);
-    int       target = 0;
-    const int phase  = e.Phase(NowUs(), &target);
-    const int left   = target - phase;
+    const int left = GetEncoder(encoder).Left();
     return left >= 0 ? (left + 3) / 4 : -((-left + 3) / 4);
 }
 
