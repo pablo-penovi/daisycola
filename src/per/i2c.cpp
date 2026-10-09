@@ -62,6 +62,21 @@ uint64_t TransferNs(const I2CHandle::Impl& impl, uint16_t bytes)
     return (uint64_t(bytes) + 1) * 9 * 1000000000ull / hz;
 }
 
+// Waits, letting the DMA interrupt run, until no DMA job is running: on any bus if `impl` is null,
+// else on that bus only. Waiting inside an interrupt handler would hang the chip, so it aborts.
+void WaitForDma(const I2CHandle::Impl* impl, const char* what)
+{
+    while(dma_busy.load() && (!impl || job.impl == impl))
+    {
+        if(daisycola::mcu::InInterrupt())
+        {
+            std::fprintf(stderr, "daisycola: I2C %s from an interrupt while a DMA transfer runs\n", what);
+            std::abort();
+        }
+        daisycola::mcu::SleepUntil(daisycola::mcu::NowNs() + 10000);
+    }
+}
+
 void DmaComplete(void*)
 {
     const DmaJob done = job;
@@ -92,6 +107,9 @@ const I2CHandle::Config& I2CHandle::GetConfig() const
 I2CHandle::Result
 I2CHandle::TransmitBlocking(uint16_t address, uint8_t* data, uint16_t size, uint32_t timeout)
 {
+    // libDaisy waits for the peripheral to be idle first, so a DMA read started just before
+    // finishes before this write reaches the device.
+    WaitForDma(pimpl_, "TransmitBlocking");
     daisycola::mcu::SleepUntil(daisycola::mcu::NowNs() + TransferNs(*pimpl_, size));
     daisycola::I2CDevice* dev = Find(*pimpl_, address);
     return dev && dev->Write(data, size) ? Result::OK : Result::ERR;
@@ -107,15 +125,7 @@ I2CHandle::Result I2CHandle::ReceiveDma(uint16_t            address,
         return Result::ERR; // I2C4 has no DMA in libDaisy
 
     // libDaisy queues the job and waits for the running one to finish.
-    while(dma_busy.load())
-    {
-        if(daisycola::mcu::InInterrupt())
-        {
-            std::fprintf(stderr, "daisycola: I2C DMA started from an interrupt while busy\n");
-            std::abort();
-        }
-        daisycola::mcu::SleepUntil(daisycola::mcu::NowNs() + 10000);
-    }
+    WaitForDma(nullptr, "ReceiveDma");
     dma_busy.store(true);
     job = {pimpl_, uint8_t(BusAddress(address)), data, size, callback, callback_context};
     daisycola::mcu::Schedule(daisycola::mcu::Line::kI2c, TransferNs(*pimpl_, size));

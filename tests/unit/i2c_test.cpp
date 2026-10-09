@@ -98,6 +98,28 @@ TEST_F(I2C, RoundTripThroughBlockingWriteAndDmaRead)
     EXPECT_EQ(buf[1], 0x52);
 }
 
+// CHOMPI's battery check starts a DMA read and writes a register straight after. On the chip the
+// write waits for the read, so the read sees the registers as they were.
+TEST_F(I2C, BlockingWriteWaitsForARunningDmaRead)
+{
+    FakeChip chip;
+    chip.regs[0x11] = 0xaa;
+    daisycola::AttachI2CDevice(0, 0x3f, &chip);
+    I2CHandle i2c = MakeBus();
+
+    uint8_t point[] = {0x11};
+    ASSERT_EQ(i2c.TransmitBlocking(0x3f, point, 1, 200), I2CHandle::Result::OK);
+    uint8_t buf[6] = {};
+    Done    done;
+    ASSERT_EQ(i2c.ReceiveDma(0x3f | 0x80, buf, 6, OnDone, &done), I2CHandle::Result::OK);
+
+    uint8_t write[] = {0x11, 0x55};
+    ASSERT_EQ(i2c.TransmitBlocking(0x3f, write, 2, 200), I2CHandle::Result::OK);
+    EXPECT_TRUE(done.called) << "the read finished first";
+    EXPECT_EQ(buf[0], 0xaa);
+    EXPECT_EQ(chip.regs[0x11], 0x55);
+}
+
 TEST_F(I2C, MissingDeviceNacks)
 {
     I2CHandle i2c = MakeBus();

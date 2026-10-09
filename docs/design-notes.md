@@ -68,6 +68,15 @@ The HAL shifts the address left one bit and the peripheral sends bits 7:1, so on
 bits of the address the firmware passes reach the bus. TAPE reads the MP2722 at `0x3F | 0x80`; the
 device model is reached at 0x3F.
 
+## A blocking write waits for a running DMA read
+
+libDaisy's `TransmitBlocking` spins until its peripheral is idle before it sends. TAPE's medium
+battery check depends on that: it starts a DMA read of the MP2722 status and at once writes a new
+BATT_LOW threshold, so on the chip the read sees the old threshold. daisycola's `TransmitBlocking`
+waits for a DMA job on the same bus to finish, letting its interrupt run, before it writes. Without
+that the write took 0.3 ms and the 6-byte read 0.6 ms, so the write landed first and a medium
+battery read as high.
+
 ## Interrupts are real-time signals
 
 The firmware's `main` runs on its own thread (16 MB stack). Each interrupt line is a real-time
