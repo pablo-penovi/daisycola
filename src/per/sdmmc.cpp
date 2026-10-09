@@ -1,6 +1,9 @@
 #include "per/sdmmc.h"
-#include "stub.h"
 
 using namespace daisy;
 
-SdmmcHandler::Result SdmmcHandler::Init(const Config& cfg) { DAISYCOLA_STUB(); }
+// The SD card is an image file (see board/sd_card.cpp). There is no bus to set up.
+SdmmcHandler::Result SdmmcHandler::Init(const Config& cfg)
+{
+    return Result::OK;
+}

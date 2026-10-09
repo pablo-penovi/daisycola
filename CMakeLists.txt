@@ -53,6 +53,7 @@ add_library(daisycola STATIC
     src/per/uart.cpp
     src/sys/dma.cpp
     src/sys/fatfs.cpp
+    src/sys/ff_host.c
     src/sys/system.cpp
     # virtual board and MCU
     src/board/sd_card.cpp
@@ -65,9 +66,8 @@ add_library(daisycola STATIC
     ${LIBDAISY}/src/hid/switch.cpp
     ${LIBDAISY}/src/ui/UI.cpp
 
-    # FatFs
+    # FatFs (ff.c is compiled through src/sys/ff_host.c)
     ${FATFS}/diskio.c
-    ${FATFS}/ff.c
     ${FATFS}/ff_gen_drv.c
     ${FATFS}/option/ccsbcs.c
 )
@@ -82,15 +82,13 @@ target_include_directories(daisycola BEFORE PUBLIC
 )
 target_include_directories(daisycola PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# Like libDaisy's Makefile, every file sees the (replacement) device header.
-target_compile_options(daisycola PUBLIC "SHELL:-include stm32h7xx.h")
+# Like libDaisy's Makefile, every file sees the (replacement) device header. Every file also gets
+# FatFs's integer types at their required widths (see include/daisycola/ff_integer.h).
+target_compile_options(daisycola PUBLIC
+    "SHELL:-include daisycola/ff_integer.h"
+    "SHELL:-include stm32h7xx.h")
 target_compile_features(daisycola PUBLIC cxx_std_17)
 set_target_properties(daisycola PROPERTIES CXX_EXTENSIONS ON C_EXTENSIONS ON)
-
-# FatFs needs 32-bit DWORDs (see include/daisycola/ff_integer.h).
-set_source_files_properties(
-    ${FATFS}/diskio.c ${FATFS}/ff.c ${FATFS}/ff_gen_drv.c ${FATFS}/option/ccsbcs.c
-    PROPERTIES COMPILE_OPTIONS "-include;daisycola/ff_integer.h")
 
 target_compile_options(daisycola PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wno-unused-parameter>)

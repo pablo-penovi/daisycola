@@ -1,10 +1,34 @@
 # daisycola tests.
 #
-# The TAPE tests compile the CHOMPI TAPE firmware against daisycola. They need
-# DAISYCOLA_CHOMPI_DIR (found automatically when CHOMPI is checked out next to daisycola).
+# Unit tests always build. The TAPE tests compile the CHOMPI TAPE firmware against daisycola; they
+# need DAISYCOLA_CHOMPI_DIR (found automatically when CHOMPI is checked out next to daisycola).
 
+find_package(GTest QUIET)
+if(NOT GTest_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(googletest
+        URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+endif()
+include(GoogleTest)
+
+set(have_chompi OFF)
 if(DAISYCOLA_CHOMPI_DIR AND EXISTS "${DAISYCOLA_CHOMPI_DIR}/firmware/chompi-tape/code/src")
-    add_subdirectory(tape)
+    set(have_chompi ON)
+    set(TAPE_CARD_DIR "${DAISYCOLA_CHOMPI_DIR}/firmware/card-profiles/tape-2.0")
 else()
-    message(WARNING "daisycola: CHOMPI not found, TAPE tests are skipped")
+    message(WARNING "daisycola: CHOMPI not found, tests that need TAPE are skipped")
+    set(TAPE_CARD_DIR "")
+endif()
+
+add_executable(daisycola_unit
+    unit/sd_card_test.cpp
+)
+target_link_libraries(daisycola_unit PRIVATE daisycola GTest::gtest_main)
+target_compile_definitions(daisycola_unit PRIVATE DAISYCOLA_TAPE_CARD_DIR="${TAPE_CARD_DIR}")
+gtest_discover_tests(daisycola_unit DISCOVERY_MODE PRE_TEST)
+
+if(have_chompi)
+    add_subdirectory(tape)
 endif()

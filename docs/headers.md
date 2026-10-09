@@ -41,7 +41,7 @@ includes bypass the include path, so those headers can't be replaced and must st
 | `include/daisy_seed.h` | `src/daisy_seed.h` | `DaisySeed` has QSPI, ADC, DAC, SDRAM and USB members. daisycola keeps only `Init`, `StartAudio(AudioCallback)`, `AudioSampleRate`, `AudioBlockSize`, `AudioSaiHandle`, `audio_handle`, `Print`/`PrintLine` (to stderr) and the `seed::` pin map. | Same header. `daisy_seed.cpp` differs (bootloader version check). |
 | `include/daisy_core.h` | `src/daisy_core.h` | Wrapper: `#include_next`s the original, then empties `DMA_BUFFER_MEM_SECTION` and `DTCM_MEM_SECTION`. | Fork changes `S162F_SCALE` to 1/(2^15-1) and `s162f`/`f2s16` to `int32_t`. daisycola uses the fork's as they are. |
 | `include/dev/sdram.h` | `src/dev/sdram.h` | Same declarations, with `DSY_SDRAM_BSS` and `DSY_SDRAM_DATA` empty. | Same. |
-| `include/fatfs.h`, `include/ff.h`, `include/diskio.h` | `src/sys/fatfs.h`, FatFs `ff.h`, `diskio.h` | Wrappers that first include `daisycola/ff_integer.h`. FatFs's `integer.h` makes `DWORD` an `unsigned long`, 64 bits on x86-64; FatFs needs 32. | `ff.c`: only braces and a debug variable differ. `sys/ffconf.h`: the fork sets `_FS_RPATH` to 2 (upstream 0). |
+| `include/daisycola/ff_integer.h` | FatFs `integer.h` | Force-included into every file. FatFs's `integer.h` makes `DWORD` an `unsigned long`, 64 bits on x86-64; FatFs needs 32. This header defines the types at their required widths and sets `integer.h`'s include guard. | `ff.c`: only braces and a debug variable differ. `sys/ffconf.h`: the fork sets `_FS_RPATH` to 2 (upstream 0). |
 | `include/stm32h7xx.h`, `include/stm32h7xx_hal.h` | CMSIS device header and HAL | Force-included into every file, as libDaisy's Makefile does. Declares the `IRQn_Type` values daisycola models, `HAL_NVIC_EnableIRQ/DisableIRQ`, `HAL_PWR_EnterSTOPMode` and the `PWR_*` constants. | n/a |
 | `include/cmsis_gcc.h` | CMSIS `cmsis_gcc.h` | `__disable_irq`, `__enable_irq`, `__get_PRIMASK`, `__set_PRIMASK` on the virtual MCU. This is how `util/scopedirqblocker.h` (kind 3) works on the host. | n/a |
 | `include/Limiter.h` | none | TAPE includes `"Limiter.h"`; the file is `limiter.h`. Forwards the include. Needs the firmware source directory on the include path. | n/a |
@@ -77,7 +77,8 @@ includes bypass the include path, so those headers can't be replaced and must st
 | `util/FIFO.h` | | Fork adds `MassPushBack`, `PopFrontMany`. |
 | `util/scopedirqblocker.h` | Uses daisycola's `cmsis_gcc.h`. | Same. |
 | `util/wav_format.h`, `util/ringbuffer.h`, `util/Stack.h` | | Same. |
-| FatFs `ff.c`, `diskio.c`, `ff_gen_drv.c`, `option/ccsbcs.c` | Compiled with `daisycola/ff_integer.h` force-included. | See above. |
+| FatFs `diskio.c`, `ff_gen_drv.c`, `option/ccsbcs.c` | | See `ff_integer.h` above. |
+| FatFs `ff.c` | Compiled through `src/sys/ff_host.c`, which renames `f_write` and wraps it. CHOMPI calls `f_write(..., NULL)`; FatFs stores the byte count through that pointer. On the STM32 address 0 is ITCM RAM and nothing happens; on Linux it crashes. The wrapper passes a scratch counter instead. | See `ff_integer.h` above. |
 
 ## Not provided
 
