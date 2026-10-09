@@ -144,7 +144,16 @@ Full scale doesn't wrap. In 24-bit two's complement, 1.0 × 2^23 = 0x800000 woul
 -1.0, and the first audio test expected that. But `f2s24` clamps to ±`FBIPMAX` (0.999985) before
 scaling, so 1.0 becomes about 8388482. Because daisycola uses libDaisy's own conversions both ways,
 firmware output never goes past ±0.999985 and host input is clipped to the same range. The audio
-tests check that value. Audio buffers are arrays of `kMaxAudioChannels` pointers; a null pointer
+tests check that value.
+
+Negative samples need the SAI's 24-bit word. `s242f` sign-extends from bit 23 with
+`(x ^ 0x800000) - 0x800000`, which is right for a raw 24-bit word but takes about 2.0 off a
+negative int32 straight from `f2s24`. On the device the SAI only carries the low 24 bits, so
+daisycola masks the word to 24 bits between the two conversions. Until CHAMPI's headless runner
+looked at TAPE's output, no test had a negative sample, and every negative half-wave came out
+near -2.0.
+
+Audio buffers are arrays of `kMaxAudioChannels` pointers; a null pointer
 means an unused channel.
 
 Two clocks can raise the interrupt. The internal clock is a timer at the block rate, which is what

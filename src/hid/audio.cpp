@@ -63,13 +63,14 @@ void Fail(const char* message)
 }
 
 // A sample's round trip through the codec's integer format, with libDaisy's own conversions.
-// They clip to +-FBIPMAX (0.999985) first.
+// They clip to +-FBIPMAX (0.999985) first. A 24-bit sample travels in the low 24 bits of a 32-bit
+// DMA word, and s242f sign-extends from bit 23, so the word is masked as the SAI would.
 float Quantise(float x, SaiHandle::Config::BitDepth depth)
 {
     switch(depth)
     {
         case SaiHandle::Config::BitDepth::SAI_16BIT: return s162f(f2s16(x));
-        case SaiHandle::Config::BitDepth::SAI_24BIT: return s242f(f2s24(x));
+        case SaiHandle::Config::BitDepth::SAI_24BIT: return s242f(f2s24(x) & 0xffffff);
         case SaiHandle::Config::BitDepth::SAI_32BIT: return s322f(f2s32(x));
     }
     return x;

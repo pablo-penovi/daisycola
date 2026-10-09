@@ -383,9 +383,10 @@ namespace audio
 {
 void Levels(AudioHandle::InputBuffer, AudioHandle::OutputBuffer out, size_t size)
 {
+    // Channel 2 is negative: 24-bit samples must keep their sign through the codec format.
     for(size_t c = 0; c < 4; c++)
         for(size_t i = 0; i < size; i++)
-            out[c][i] = 0.25f * float(c + 1);
+            out[c][i] = c == 1 ? -0.5f : 0.25f * float(c + 1);
 }
 
 // TAPE's audio setup: a second codec on SAI2, 24-frame blocks.
@@ -456,6 +457,7 @@ TEST_F(Firmware, InternalAudioClockRunsAtTheSampleRate)
     EXPECT_NEAR(frames / seconds, 48000.0, 48000.0 * 0.05);
 
     EXPECT_EQ(ch[0][0], 0.25f);
+    EXPECT_EQ(ch[1][0], -0.5f);
     EXPECT_EQ(ch[2][0], 0.75f);
     EXPECT_EQ(ch[3][0], s242f(f2s24(0.999985f))) << "libDaisy clips output just below 1.0";
     EXPECT_EQ(daisycola::GetAudioStats().overruns, 0u);
@@ -469,11 +471,12 @@ TEST_F(Firmware, HostAudioClockPassesBlocksThroughWithTwoBlocksOfLatency)
     const size_t block = daisycola::GetAudioFormat().block_size;
     ASSERT_EQ(block, 48u);
 
-    // Buffers of 100 frames: not a multiple of the block size. The ramp is exact in 24 bits.
+    // Buffers of 100 frames: not a multiple of the block size. The ramp crosses zero and is
+    // exact in 24 bits.
     constexpr size_t kFrames = 100, kCalls = 50;
     std::vector<float> input(kFrames * kCalls), output(kFrames * kCalls);
     for(size_t n = 0; n < input.size(); n++)
-        input[n] = float(n) / 65536.f;
+        input[n] = (float(n) - 2500.f) / 65536.f;
     for(size_t k = 0; k < kCalls; k++)
     {
         const float* in[4]  = {&input[k * kFrames], &input[k * kFrames], nullptr, nullptr};
