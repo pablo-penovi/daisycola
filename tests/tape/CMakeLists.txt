@@ -25,3 +25,9 @@ target_link_libraries(tape_firmware PUBLIC daisycola tape_daisysp)
 add_executable(tape_link tape_link.cpp)
 target_link_libraries(tape_link PRIVATE tape_firmware)
 add_test(NAME tape_link COMMAND tape_link)
+
+# Phase 3: peripheral models driven by TAPE's own code, single-threaded.
+add_executable(tape_peripherals peripherals_test.cpp ${TAPE}/src/encoder.cpp)
+target_include_directories(tape_peripherals PRIVATE ${TAPE}/src)
+target_link_libraries(tape_peripherals PRIVATE daisycola GTest::gtest_main)
+gtest_discover_tests(tape_peripherals DISCOVERY_MODE PRE_TEST)

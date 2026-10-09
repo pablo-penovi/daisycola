@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(daisycola LANGUAGES C CXX)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # --- Where libDaisy (and, for tests, the CHOMPI firmware) live -----------------------------------
 
@@ -56,6 +57,7 @@ add_library(daisycola STATIC
     src/sys/ff_host.c
     src/sys/system.cpp
     # virtual board and MCU
+    src/board/board.cpp
     src/board/sd_card.cpp
     src/mcu/vmcu.cpp
     src/host.cpp

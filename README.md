@@ -38,7 +38,9 @@ This is **not** a complete libDaisy compatibility layer, and it doesn't aim to b
 
 ## Status
 
-In progress. TAPE compiles and links against daisycola; the hardware bodies are still stubs.
+In progress. TAPE compiles and links against daisycola. The SD card, GPIO, CD4021 shift registers,
+encoders, I2C, timers and the WS2812 LED DMA are modelled and tested single-threaded. The firmware
+thread with real interrupts, audio and MIDI are next.
 
 ## Building
 
@@ -53,7 +55,8 @@ ctest --test-dir build
 
 Otherwise point CMake at the trees with `-DDAISYCOLA_CHOMPI_DIR=...` or
 `-DDAISYCOLA_LIBDAISY_DIR=...`. [docs/headers.md](docs/headers.md) lists which libDaisy headers
-daisycola replaces.
+daisycola replaces, and [docs/design-notes.md](docs/design-notes.md) explains the main design
+decisions.
 
 ## Forking and contributing
 

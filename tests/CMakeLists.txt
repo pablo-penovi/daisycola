@@ -23,7 +23,9 @@ else()
 endif()
 
 add_executable(daisycola_unit
+    unit/i2c_test.cpp
     unit/sd_card_test.cpp
+    unit/ws2812_test.cpp
 )
 target_link_libraries(daisycola_unit PRIVATE daisycola GTest::gtest_main)
 target_compile_definitions(daisycola_unit PRIVATE DAISYCOLA_TAPE_CARD_DIR="${TAPE_CARD_DIR}")

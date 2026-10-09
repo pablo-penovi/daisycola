@@ -3,7 +3,6 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
-#include <iterator>
 
 #include "daisycola/host.h"
 #include "diskio.h"
@@ -18,8 +17,9 @@ namespace
 {
 std::vector<uint8_t> ReadHostFile(const fs::path& path)
 {
-    std::ifstream in(path, std::ios::binary);
-    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    std::vector<uint8_t> data(fs::file_size(path));
+    std::ifstream(path, std::ios::binary).read(reinterpret_cast<char*>(data.data()), data.size());
+    return data;
 }
 
 void WriteHostFile(const fs::path& path, const std::string& text)
