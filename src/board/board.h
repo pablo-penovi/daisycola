@@ -32,4 +32,8 @@ bool ReadPin(daisy::Pin pin);
 /** Firmware side: drives an output pin. Chips wired to the pin see the edge. */
 void WritePin(daisy::Pin pin, bool level);
 
+/** Maps the Seed's 64 MB of SDRAM at 0xC0000000, for firmware that uses raw SDRAM addresses.
+ *  Warns and carries on if the address range is taken. */
+void MapSdram();
+
 } // namespace daisycola::board

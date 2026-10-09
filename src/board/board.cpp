@@ -58,7 +58,7 @@ void Fail(const char* message)
 
 struct Encoder
 {
-    Line                  a, b;
+    EncoderLine           a, b;
     uint32_t              dwell_us;
     std::atomic<uint64_t> schedule{0}; // t0_us:40 | p0:12 | target:12
 
@@ -318,7 +318,7 @@ uint64_t GetSrInputs(int chain)
 
 namespace
 {
-void WireLine(const Line& line, Encoder* e, bool is_b)
+void WireLine(const EncoderLine& line, Encoder* e, bool is_b)
 {
     if(line.chain < 0)
     {
@@ -337,7 +337,7 @@ void WireLine(const Line& line, Encoder* e, bool is_b)
     c.overlay_count.store(n + 1, std::memory_order_release);
 }
 
-bool SameLine(const Line& x, const Line& y)
+bool SameLine(const EncoderLine& x, const EncoderLine& y)
 {
     return x.chain == y.chain && (x.chain < 0 ? x.pin == y.pin : x.bit == y.bit);
 }
@@ -350,7 +350,7 @@ Encoder& GetEncoder(int id)
 }
 } // namespace
 
-int AttachEncoder(Line a, Line b, uint32_t dwell_us)
+int AttachEncoder(EncoderLine a, EncoderLine b, uint32_t dwell_us)
 {
     CheckWiring();
     const int id = encoder_count.load();
@@ -374,7 +374,7 @@ void QueueDetents(int encoder, int detents)
     GetEncoder(encoder).Queue(detents, NowUs());
 }
 
-void QueueDetents(Line a, Line b, int detents)
+void QueueDetents(EncoderLine a, EncoderLine b, int detents)
 {
     for(int i = 0; i < encoder_count.load(); i++)
         if(SameLine(encoders[i].a, a) && SameLine(encoders[i].b, b))

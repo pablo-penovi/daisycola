@@ -2,7 +2,6 @@
 #include "stm32h7xx_hal.h"
 
 #include "mcu/vmcu.h"
-#include "stub.h"
 
 extern "C"
 {
@@ -36,8 +35,10 @@ extern "C"
         daisycola::mcu::NvicSetEnabled(IRQn, false);
     }
 
+    // Everything stops until a wake-up interrupt; here, until the host calls daisycola::Wake.
+    // The clock keeps running, unlike the chip's timers.
     void HAL_PWR_EnterSTOPMode(uint32_t Regulator, uint8_t STOPEntry)
     {
-        DAISYCOLA_STUB();
+        daisycola::mcu::EnterStop();
     }
 }

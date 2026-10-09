@@ -56,9 +56,9 @@ includes bypass the include path, so those headers can't be replaced and must st
 | `per/tim.h` | `src/per/tim.cpp` | Fork adds `optimize("-O0")` to `Init` and `Start`. |
 | `per/tim_channel.h` | `src/per/tim_channel.cpp` | Fork only. No include guard. |
 | `per/i2c.h` | `src/per/i2c.cpp` | Same. |
-| `per/sai.h` | `src/per/sai.cpp` | Same. |
+| `per/sai.h` | `src/per/sai.cpp` | Same. daisycola keeps only the configuration; the data path is `AudioHandle`'s. |
 | `hid/audio.h` | `src/hid/audio.cpp` | Same header. Fork's `audio.cpp` puts the callback on SAI2 and swaps channel pairs; daisycola presents the four channels in the order the callback sees them. |
-| `per/uart.h` | `src/per/uart.cpp` | Same header. `uart.cpp` differs between TAPE and TEMPO/WAVE. |
+| `per/uart.h` | `src/per/uart.cpp` | Same header. `uart.cpp` differs between TAPE and TEMPO/WAVE. daisycola models USART1 only, with what MIDI uses: `DmaListenStart`, `IsListening`, `PollTx`. |
 | `hid/usb_midi.h` (`MidiUsbTransport`) | `src/hid/usb_midi.cpp` | Fork adds `Reset()`; `Tx` returns `bool`. |
 | `per/sdmmc.h` | `src/per/sdmmc.cpp` | Same header. Fork's `sdmmc.cpp` changes the IRQ priority. |
 | `sys/fatfs.h` | `src/sys/fatfs.cpp` | Same. daisycola's `fatfs.cpp` links its SD-card image driver instead of the SDMMC one. |

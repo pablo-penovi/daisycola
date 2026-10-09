@@ -6,8 +6,7 @@
 // numbers and handler masks follow the lines' NVIC priorities.
 //
 // Before the firmware thread starts (and in single-threaded tests) the same calls work without
-// signals: interrupts are queued and ServiceInterrupts() runs them on the calling thread. That
-// single-threaded mode is all that exists so far; the firmware thread comes next.
+// signals: interrupts are queued and ServiceInterrupts() runs them on the calling thread.
 #pragma once
 
 #include <cstddef>
@@ -74,7 +73,7 @@ uint64_t NowNs();
 void SleepUntil(uint64_t t_ns);
 
 /** Switches to a clock that only moves when AdvanceClock (or a firmware delay) moves it. Only
- *  allowed while the firmware thread is not running. */
+ *  allowed before the firmware thread starts. */
 void UseManualClock(bool manual);
 
 /** Moves the manual clock forward and runs the interrupts that became due on the way. */
@@ -86,8 +85,50 @@ size_t ServiceInterrupts();
 
 // ---- Firmware thread ----------------------------------------------------------------------------
 
-/** True once the firmware thread has started and until it halts. */
+/** Starts the firmware's main on its own thread. From then on interrupts are signals. */
+void StartFirmware(int (*firmware_main)());
+
+/** True once the firmware thread has started, until it halts or main returns. */
 bool FirmwareRunning();
+
+/** True once StartFirmware has been called. A process runs firmware only once. */
+bool FirmwareStarted();
+
+/** Stops the timers and parks the firmware thread at its next delay or clock read outside an
+ *  interrupt. Returns false if it didn't park within the timeout. */
+bool HaltFirmware(uint32_t timeout_ms);
+
+/** STOP mode: masks every interrupt and waits for Wake(). Without the firmware thread it returns
+ *  at once, as if woken immediately. */
+void EnterStop();
+
+/** Ends STOP mode. Callable from any thread. */
+void Wake();
+
+struct FirmwareState
+{
+    bool     started;
+    bool     running;
+    bool     sleeping;
+    bool     exited;    // main returned
+    int      exit_code; // what it returned
+    uint64_t sleeps;    // times STOP mode was entered
+};
+FirmwareState GetFirmwareState();
+
+/** Runs a short section with every interrupt masked, from main or interrupt context, and
+ *  restores PRIMASK afterwards. */
+class Critical
+{
+  public:
+    Critical() : saved_(GetPrimask()) { DisableIrq(); }
+    ~Critical() { SetPrimask(saved_); }
+    Critical(const Critical&) = delete;
+    Critical& operator=(const Critical&) = delete;
+
+  private:
+    uint32_t saved_;
+};
 
 /** Per-line interrupt statistics. */
 struct LineStats

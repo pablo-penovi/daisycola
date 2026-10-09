@@ -8,7 +8,7 @@
 #include "temp_led_stuff.h" // defines TAPE's LED globals: include in this file only
 
 using namespace daisy;
-using daisycola::Line;
+using daisycola::EncoderLine;
 
 namespace
 {
@@ -150,7 +150,7 @@ TEST_F(Tape, EncoderOnPinsCountsQueuedDetents)
     // TAPE's encoder 5: A on D0, B on D20, click on D10.
     chompi::ChompiEncoder enc;
     enc.Init(seed::D0, seed::D20, seed::D10);
-    const int id = daisycola::AttachEncoder(Line::OnPin(seed::D0), Line::OnPin(seed::D20));
+    const int id = daisycola::AttachEncoder(EncoderLine::OnPin(seed::D0), EncoderLine::OnPin(seed::D20));
 
     daisycola::QueueDetents(id, 3);
     EXPECT_EQ(daisycola::PendingDetents(id), 3);
@@ -180,10 +180,10 @@ TEST_F(Tape, EncoderOnShiftRegisterCountsQueuedDetents)
         sr.Update();
         enc.Debounce(sr.RawState(0), sr.RawState(1));
     };
-    daisycola::QueueDetents(Line::OnSr(chain, 0), Line::OnSr(chain, 1), 4);
+    daisycola::QueueDetents(EncoderLine::OnSr(chain, 0), EncoderLine::OnSr(chain, 1), 4);
     EXPECT_EQ(CountIncrements(enc, poll, 80), 4);
-    daisycola::QueueDetents(Line::OnSr(chain, 0), Line::OnSr(chain, 1), -2);
-    daisycola::QueueDetents(Line::OnSr(chain, 0), Line::OnSr(chain, 1), -1);
+    daisycola::QueueDetents(EncoderLine::OnSr(chain, 0), EncoderLine::OnSr(chain, 1), -2);
+    daisycola::QueueDetents(EncoderLine::OnSr(chain, 0), EncoderLine::OnSr(chain, 1), -1);
     EXPECT_EQ(CountIncrements(enc, poll, 80), -3);
 }
 

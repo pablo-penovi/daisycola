@@ -49,15 +49,96 @@ The HAL shifts the address left one bit and the peripheral sends bits 7:1, so on
 bits of the address the firmware passes reach the bus. TAPE reads the MP2722 at `0x3F | 0x80`; the
 device model is reached at 0x3F.
 
+## Interrupts are real-time signals
+
+The firmware's `main` runs on its own thread (16 MB stack). Each interrupt line is a real-time
+signal, `SIGRTMIN + 2 + line`, sent to that thread, so a handler preempts the main loop on its own
+stack as on the chip. Lines are numbered by priority, and Linux delivers the lowest-numbered
+pending real-time signal first, so interrupts that are pending together run in the NVIC's order.
+Each handler's `sa_mask` holds the lines its priority keeps out: priority-0 handlers mask every
+line, the priority-15 timers mask the timers.
+
+PRIMASK, NVIC enables and STOP mode are kept as state, and every change recomputes the thread's
+signal mask from it (blocking all lines first, so that no handler sees a half-updated mask). When a
+handler returns, the interrupted context's mask is recomputed too and written into the signal's
+`ucontext`, so an NVIC change made inside a handler sticks, and `__enable_irq` inside a handler
+goes back to the handler's level rather than unmasking everything. Handlers save and restore
+`errno`.
+
+`Schedule` and `SetPeriodic` use one POSIX timer per line, aimed at the firmware thread
+(`SIGEV_THREAD_ID`). A periodic timer whose signal is still pending doesn't queue another, which is
+how an NVIC pending bit behaves. Host threads raise lines with `pthread_sigqueue`. Raises can also
+merge (ThreadSanitizer merges them), so daisycola's own handlers drain everything waiting rather
+than one item per raise. Delays sleep with `clock_nanosleep`; a signal cuts the sleep short, its
+handler runs, and the sleep resumes. The thread's timer slack is 1 ns.
+
+The plan kept a fallback (one lock and an interrupt-runner thread) in case signals proved
+unworkable. They didn't, so it doesn't exist.
+
+## Halting, and one firmware per process
+
+`Halt` stops the timers and parks the firmware thread for good at its next delay or clock read
+outside a handler, with every signal blocked. It never unwinds, so nothing is torn down under the
+firmware, and parking in main context means TAPE's timer callback isn't halfway through an SD
+write. A parked firmware can't be restarted, so a process runs firmware once. The firmware tests
+rely on ctest running each test in its own process.
+
+## ThreadSanitizer changes signal timing
+
+ThreadSanitizer defers asynchronous signals to its own safe points and runs the deferred handlers
+with every signal blocked. Under it, interrupts don't nest and arrive a little late. Race detection
+still works. The preemption test skips its nesting check under ThreadSanitizer.
+
+## Raw SDRAM and AddressSanitizer
+
+`Start` maps 64 MB at 0xC0000000 for firmware that uses raw SDRAM addresses. On x86-64 that address
+lies in AddressSanitizer's shadow gap. With `ASAN_OPTIONS=protect_shadow_gap=0` the gap is left
+unmapped and ASan counts it as ordinary memory, so daisycola maps the SDRAM and its (zeroed)
+shadow there. The TAPE boot test sets the option through `__asan_default_options`. Without it,
+`Start` warns and firmware that touches raw SDRAM crashes.
+
+## Audio
+
+The audio interrupt takes a block from the input ring, runs it through libDaisy's own conversions
+(`f2s24`, then `s242f`: clipped to ±0.999985 and quantised to 24 bits), divides by `postgain`,
+calls the callback, and converts the output back the same way after scaling by `postgain` and
+`output_compensation`. Channels are in the order the callback sees them. For TAPE that is mic,
+unused, aux L, aux R in, and headphones L/R, master L/R out.
+
+Two clocks can raise the interrupt. The internal clock is a timer at the block rate, which is what
+headless runs use. With the host clock, the host's audio thread calls `ProcessAudio`; it raises
+the interrupt once for every full block and waits (bounded) for the output. The output ring starts
+with two blocks of silence, so host buffers that aren't a multiple of the block size always find
+enough output.
+
+## MIDI
+
+Host bytes go into a ring and raise the port's receive interrupt. The UART handler copies them
+into the firmware's circular DMA buffer and calls the listener, like libDaisy's idle-line handler;
+the USB handler passes them to the parse callback. Either way the fork's own `MidiHandler` and
+parser see them. `PollTx` takes the bytes' time on the wire (320 µs each at 31250 baud). USB sends
+fail while the host has USB unplugged, after the fork's three retries 100 µs apart. Output is
+written with interrupts masked, so a message sent from a handler can't split one sent from the main
+loop.
+
+## STOP mode
+
+`HAL_PWR_EnterSTOPMode` masks every interrupt and waits for the host's `Wake()`. The clock keeps
+running, unlike the chip's timers, so `System::GetNow()` jumps over the sleep.
+
 ## Single-threaded mode
 
 Before the firmware thread exists, interrupts are queued and `ServiceInterrupts()` runs them on
 the calling thread. With `UseManualClock(true)` time only moves through `AdvanceClock()` and
 firmware delays, which step from one due interrupt to the next. The peripheral tests use this to
-drive TAPE's own code deterministically.
+drive TAPE's own code deterministically. Once the firmware has started, the process stays in
+thread mode.
 
 ## Things the plan listed that CHOMPI doesn't use
 
 - `SCB_CleanDCache_by_Addr` and friends: no CHOMPI firmware calls them. Cache maintenance that
   libDaisy does internally (`dsy_dma_clear_cache_for_buffer`) is a no-op.
 - `reset_requested`: no CHOMPI firmware resets itself or jumps to the bootloader.
+- The event log (a ring of pin changes, DMA frames and MIDI bytes for golden tests): optional in the
+  plan, and nothing needs it yet. `GetPinChanges`, `GetDmaFrame` and the MIDI and audio rings cover
+  what CHAMPI and the tests look at.

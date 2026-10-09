@@ -31,6 +31,12 @@ target_link_libraries(daisycola_unit PRIVATE daisycola GTest::gtest_main)
 target_compile_definitions(daisycola_unit PRIVATE DAISYCOLA_TAPE_CARD_DIR="${TAPE_CARD_DIR}")
 gtest_discover_tests(daisycola_unit DISCOVERY_MODE PRE_TEST)
 
+# Firmware-thread tests. ctest runs each test in its own process, which they need: a process can
+# only run firmware once.
+add_executable(daisycola_mcu mcu/firmware_test.cpp)
+target_link_libraries(daisycola_mcu PRIVATE daisycola GTest::gtest_main)
+gtest_discover_tests(daisycola_mcu DISCOVERY_MODE PRE_TEST)
+
 if(have_chompi)
     add_subdirectory(tape)
 endif()

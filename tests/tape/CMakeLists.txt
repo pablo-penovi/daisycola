@@ -31,3 +31,9 @@ add_executable(tape_peripherals peripherals_test.cpp ${TAPE}/src/encoder.cpp)
 target_include_directories(tape_peripherals PRIVATE ${TAPE}/src)
 target_link_libraries(tape_peripherals PRIVATE daisycola GTest::gtest_main)
 gtest_discover_tests(tape_peripherals DISCOVERY_MODE PRE_TEST)
+
+# Phase 4: TAPE boots headless on the firmware thread.
+add_executable(tape_boot boot_test.cpp)
+target_link_libraries(tape_boot PRIVATE tape_firmware GTest::gtest_main)
+target_compile_definitions(tape_boot PRIVATE DAISYCOLA_TAPE_CARD_DIR="${TAPE_CARD_DIR}")
+gtest_discover_tests(tape_boot DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 180)

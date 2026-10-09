@@ -1,7 +1,16 @@
 /* daisycola host API: how a host program drives the virtual Daisy board.
  *
- * The firmware runs on its own thread. Everything here is meant to be called from host threads
- * unless it says otherwise.
+ * This is the only daisycola header a host program needs. The order of things:
+ *
+ *   1. Wire the board: CD4021 chains, encoders, I2C devices, pins, the SD card image, the audio
+ *      clock. Wiring calls are only allowed before Start.
+ *   2. Start the firmware. It runs on its own thread, with interrupts as on the device.
+ *   3. Drive inputs and read outputs from host threads: pins, shift-register inputs, encoder
+ *      detents, audio, MIDI, LED frames.
+ *   4. Halt it, if the host wants to look at the SD card or exit cleanly.
+ *
+ * Everything here is meant to be called from host threads unless it says otherwise. Calls marked
+ * "from one thread" must not be made from two threads at once.
  */
 #pragma once
 
@@ -16,12 +25,60 @@
 namespace daisycola
 {
 // ---- Firmware ----------------------------------------------------------------------------------
+//
+// Set the board up first (chips, encoders, I2C devices, the SD card, the audio clock), then start
+// the firmware. A process runs firmware once: restarting it needs a new process.
 
 /** The firmware's main function, renamed at compile time with -Dmain=<name>. */
 using FirmwareMain = int (*)();
 
-/** Starts the firmware on its own thread. */
+/** Starts the firmware on its own thread and returns once it is running. */
 void Start(FirmwareMain firmware_main);
+
+/** Stops the firmware: its timers stop and the thread parks for good at its next delay or clock
+ *  read outside an interrupt handler. Returns false if that didn't happen within the timeout.
+ *  Afterwards the SD-card helpers can be used again. */
+bool Halt(uint32_t timeout_ms = 1000);
+
+/** Wakes the firmware from STOP mode (HAL_PWR_EnterSTOPMode), as a wake-up interrupt would. */
+void Wake();
+
+struct BoardState
+{
+    bool     started;   // Start was called
+    bool     running;   // the firmware thread runs: started, not halted, main hasn't returned
+    bool     sleeping;  // in STOP mode, waiting for Wake
+    bool     exited;    // main returned
+    int      exit_code; // what main returned
+    uint64_t sleeps;    // times the firmware entered STOP mode
+};
+
+BoardState GetBoardState();
+
+/** Interrupt sources of the virtual MCU, highest priority first. Audio, I2C, UART, the timer DMA
+ *  and USB have NVIC priority 0 and don't preempt each other; the timers have priority 15. */
+enum class Irq
+{
+    kAudio,
+    kI2c,
+    kUart,
+    kTimDma,
+    kUsb,
+    kTim2,
+    kTim3,
+    kTim4,
+    kTim5,
+};
+
+struct IrqStats
+{
+    uint64_t count;    // handler runs
+    uint64_t total_ns; // time spent in the handler
+    uint64_t max_ns;   // longest single run
+    uint64_t dropped;  // raises lost because the signal queue was full
+};
+
+IrqStats GetIrqStats(Irq irq);
 
 // ---- Pins -------------------------------------------------------------------------------------
 //
@@ -69,10 +126,10 @@ uint64_t GetSrInputs(int chain);
 // detent is the direction the firmware's encoder code counts as +1 (B falls before A).
 
 /** One encoder line: a pin, or input `bit` of a CD4021 chain. */
-struct Line
+struct EncoderLine
 {
-    static Line OnPin(daisy::Pin pin) { return {pin, -1, 0}; }
-    static Line OnSr(int chain, int bit) { return {daisy::Pin(), chain, bit}; }
+    static EncoderLine OnPin(daisy::Pin pin) { return {pin, -1, 0}; }
+    static EncoderLine OnSr(int chain, int bit) { return {daisy::Pin(), chain, bit}; }
 
     daisy::Pin pin;
     int        chain; // -1 for a pin
@@ -84,13 +141,13 @@ struct Line
  *  The dwell must cover at least two of the firmware's reads: CHOMPI samples encoders once per
  *  millisecond, and its shift-register decoder needs A low for two samples. The 3 ms default
  *  gives about 80 detents per second. */
-int AttachEncoder(Line a, Line b, uint32_t dwell_us = 3000);
+int AttachEncoder(EncoderLine a, EncoderLine b, uint32_t dwell_us = 3000);
 
 /** Queues detents on an encoder: positive is +1 for the firmware, negative is -1. */
 void QueueDetents(int encoder, int detents);
 
 /** Finds the encoder on these lines, wiring one up first if there is none, and queues detents. */
-void QueueDetents(Line a, Line b, int detents);
+void QueueDetents(EncoderLine a, EncoderLine b, int detents);
 
 /** Detents queued on the encoder that haven't finished yet. */
 int PendingDetents(int encoder);
@@ -165,9 +222,88 @@ size_t Ws2812Decode(const uint32_t* duty,
 /** Ws2812Decode on a captured frame. */
 size_t Ws2812Decode(const DmaFrame& frame, ColorOrder order, Rgb* leds, size_t max_leds);
 
+// ---- Audio -------------------------------------------------------------------------------------
+//
+// The firmware's audio callback runs in the audio interrupt, one block at a time (TAPE: 24 frames
+// of 4 channels at 48 kHz). Buffers are planar: arrays of kMaxAudioChannels channel pointers, in
+// the order the callback sees the channels. A null input channel is silence and a null output
+// channel is skipped; output channels the firmware doesn't have are silent. Samples pass through
+// the codec's integer format as on the device: input and output are clipped to +-0.999985 and
+// quantised to the SAI's bit depth, and the output is scaled by postgain and output_compensation,
+// as libDaisy's AudioHandle does.
+
+constexpr size_t kMaxAudioChannels = 4;
+
+struct AudioFormat
+{
+    bool   started;     // the firmware has started audio; the rest is valid from then on
+    float  sample_rate; // Hz
+    size_t block_size;  // frames per callback
+    size_t channels;    // 2 with one SAI, 4 with two
+};
+
+AudioFormat GetAudioFormat();
+
+/** What runs the audio interrupt. */
+enum class AudioClock
+{
+    kInternal, // a timer at the block rate, like the codec's clock; the default
+    kHost,     // the host's audio thread, through ProcessAudio
+};
+
+/** Chooses the audio clock. Call before Start. */
+void SetAudioClock(AudioClock clock);
+
+/** With the host clock: hands the firmware `frames` frames of input, runs the audio interrupt
+ *  for every full block, and returns `frames` frames of output. Output lags input by two blocks.
+ *  Call from one thread (the host's audio thread). Waits for
+ *  the firmware for a bounded time; returns false, padding with silence, if it fell behind or
+ *  hasn't started audio yet. */
+bool ProcessAudio(const float* const* in, float* const* out, size_t frames);
+
+/** With the internal clock: queues input for the firmware. Returns the frames that fit; blocks
+ *  that find no input get silence. Call from one thread. */
+size_t WriteAudio(const float* const* in, size_t frames);
+
+/** With the internal clock: reads output the firmware has produced. Returns the frames read.
+ *  Output that isn't read is dropped once the buffer (8192 frames) is full. Call from one
+ *  thread. */
+size_t ReadAudio(float* const* out, size_t frames);
+
+struct AudioStats
+{
+    uint64_t blocks;    // audio callbacks run
+    uint64_t underruns; // blocks that ran without (enough) input
+    uint64_t overruns;  // output blocks dropped because the host didn't read them
+};
+
+AudioStats GetAudioStats();
+
+// ---- MIDI --------------------------------------------------------------------------------------
+//
+// Raw MIDI bytes in and out of the firmware's UART (TRS/DIN, USART1) and USB MIDI ports. Input
+// raises the port's receive interrupt, so the firmware's MidiHandler parses it as on the device.
+// Each function may be called from any host thread.
+
+enum class MidiPort
+{
+    kUart,
+    kUsb,
+};
+
+/** Sends bytes to the firmware. Returns how many fit (the buffer holds 4096). USB input is
+ *  dropped while USB is disconnected. */
+size_t WriteMidiIn(MidiPort port, const uint8_t* data, size_t size);
+
+/** Takes bytes the firmware sent. Returns how many were read. */
+size_t ReadMidiOut(MidiPort port, uint8_t* data, size_t size);
+
+/** Plugs in or unplugs USB. While unplugged (the default), the firmware's USB sends fail. */
+void SetUsbConnected(bool connected);
+
 // ---- Single-threaded testing -------------------------------------------------------------------
 //
-// Without the firmware thread, daisycola's peripherals can be driven straight from a test.
+// Before the firmware thread starts, daisycola's peripherals can be driven straight from a test.
 // Interrupts are queued and run by ServiceInterrupts on the calling thread.
 
 /** Switches to a clock that only moves through AdvanceClock and firmware delays. */

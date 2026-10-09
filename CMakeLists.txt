@@ -58,6 +58,7 @@ add_library(daisycola STATIC
     src/sys/system.cpp
     # virtual board and MCU
     src/board/board.cpp
+    src/board/midi.cpp
     src/board/sd_card.cpp
     src/mcu/vmcu.cpp
     src/host.cpp

@@ -25,6 +25,7 @@ typedef enum
     USART1_IRQn       = 37,
     TIM5_IRQn         = 50,
     DMA2_Stream5_IRQn = 68,
+    OTG_HS_IRQn       = 77,
     OTG_FS_IRQn       = 101,
 } IRQn_Type;
 
