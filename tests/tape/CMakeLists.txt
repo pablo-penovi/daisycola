@@ -37,3 +37,9 @@ add_executable(tape_boot boot_test.cpp)
 target_link_libraries(tape_boot PRIVATE tape_firmware GTest::gtest_main)
 target_compile_definitions(tape_boot PRIVATE DAISYCOLA_TAPE_CARD_DIR="${TAPE_CARD_DIR}")
 gtest_discover_tests(tape_boot DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 180)
+
+# TAPE's sample reader before its file opens (include/ff.h).
+add_executable(tape_sample_reader sample_reader_test.cpp)
+target_link_libraries(tape_sample_reader PRIVATE tape_firmware GTest::gtest_main)
+target_compile_options(tape_sample_reader PRIVATE -w)
+gtest_discover_tests(tape_sample_reader DISCOVERY_MODE PRE_TEST)
