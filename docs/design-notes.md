@@ -12,7 +12,7 @@ FatFSInterface). Only `daisy.h`, `daisy_seed.h`, `daisy_core.h` (an `#include_ne
 `dev/sdram.h`, `stm32h7xx.h`, `stm32h7xx_hal.h`, `cmsis_gcc.h` and `Limiter.h` are replaced.
 Headers that libDaisy reaches by relative path (`sys/system.h`, `util/scopedirqblocker.h`,
 `util/FIFO.h`) can't be replaced at all. [headers.md](headers.md) lists each one, along with
-the host snags fixed on the way: the force-included `daisycola/ff_integer.h`, the `f_write`
+the host snags fixed on the way: the force-included `daisycola/ff_integer.h`, the `f_size()`
 wrapper and the DaisySP `DelayLine` overload. Because of that overload, a firmware build must put
 daisycola's include directories before DaisySP's.
 
@@ -124,26 +124,94 @@ handler runs, and the sleep resumes. The thread's timer slack is 1 ns.
 The plan kept a fallback (one lock and an interrupt-runner thread) in case signals proved
 unworkable. They didn't, so it doesn't exist.
 
-## Halting, and one firmware per process
+## Halting
 
-`Halt` stops the timers and parks the firmware thread for good at its next delay or clock read
-outside a handler, with every signal blocked. It never unwinds, so nothing is torn down under the
-firmware, and parking in main context means TAPE's timer callback isn't halfway through an SD
-write. A parked firmware can't be restarted, so a process runs firmware once. The firmware tests
-rely on ctest running each test in its own process.
+`Halt` stops the timers and parks the firmware at its next delay or clock read outside a handler
+(or in STOP mode). Parking jumps back to the start of the firmware thread with every signal
+blocked, and the thread ends; `Halt` joins it. Nothing unwinds, so no destructor in the firmware
+runs and nothing is torn down under it, and parking in main context means TAPE's timer callback
+isn't halfway through an SD write. The jump is `_setjmp`/`_longjmp`, with the signals blocked by
+hand first: ThreadSanitizer (GCC 16 with glibc 2.44) loses track of `sigsetjmp` and `setjmp` and
+aborts on the jump back.
+
+A halted firmware can't be started again in place. Its state is spread over globals: the
+firmware's static buffers, libDaisy's and daisycola's own, function-local statics, constructors
+that ran once. Loading its code again is the only reliable way to reset all of it, which is what a
+power cycle does (below). Firmware linked into the program therefore runs once per process, and
+the firmware tests rely on ctest running each test in its own process.
+
+## The SD card is a folder
+
+The card used to be a FAT32 disk image behind a FatFs block driver. To get samples in and out, a
+host had to copy files through FatFs or loop-mount the image. Now the card is a host folder, and
+daisycola implements FatFs's public API on it directly (`src/sys/ff_folder.cpp`); `ff.c`, the
+driver layer and the image are gone.
+
+The functions mirror FatFs R0.12c with libDaisy's configuration wherever a folder can show the
+difference: names match without regard to case (exact name first, then a case-insensitive scan of
+the directory), a rename doesn't replace an existing file (TAPE unlinks first), a seek past the
+end of a writable file extends it, the string functions convert line ends (`_USE_STRFUNC` 2), and
+`f_getcwd` puts the drive first because there are two volumes. A full disk returns a short count
+from `f_write`, as FatFs does, and `FR_DENIED` elsewhere.
+
+They run on the firmware thread and in TAPE's timer interrupt, so they can't allocate or lock: a
+handler that interrupted `malloc` would deadlock. Paths are resolved in fixed buffers, directories
+are read with the `getdents64` system call rather than `readdir` (which allocates, and whose
+`DIR` would clash with FatFs's), and errors go to stderr with `write(2)`. Open files are a fixed
+table of host descriptors keyed by the `FIL*`, claimed with compare-and-swap. `f_size`, `f_tell`
+and `f_eof` are macros that read `obj.objsize` and `fptr` straight from the `FIL`, so every call
+keeps those fields current.
+
+The folder is opened once, at `SdInsert`, and every path is resolved relative to that descriptor
+(`openat` and friends), so a later `chdir` in the host doesn't matter. A deleted folder stays open
+with no links left; each call checks for that and answers `FR_NOT_READY`, as for a pulled card,
+rather than writing into a directory nobody can see or recreating it.
+
+## Power cycles
+
+A firmware library (`daisycola_add_firmware`) holds the firmware, the libDaisy sources and its own
+copy of daisycola. It exports a single function returning a table of the host API
+(`src/firmware_api.h`); everything else is hidden. `daisycola_host` (`src/host_loader.cpp`) is the
+host side: it implements `host.h` by forwarding through the table, so host code is the same either
+way.
+
+Unloading only resets the firmware if the library really goes away, and three things can stop
+that. GNU unique symbols, which GCC uses for static locals of inline functions and template
+statics, make `dlclose` a no-op, so everything is compiled with `-fno-gnu-unique`. A `thread_local`
+the library touches on another thread pins it, or leaves a TLS block behind, so daisycola has none
+(the firmware thread is recognised by `pthread_self`). And anything the library left registered
+in the process would call into unmapped code: the POSIX timers, which are deleted; the signal
+handlers, which are put back as they were; the SDRAM mapping, the card's descriptors and the
+firmware thread, which is joined. After `dlclose`, `dlopen(RTLD_NOLOAD)` must find nothing, or
+the cycle fails rather than run the firmware with stale state.
+
+Host threads call in at any time, the audio thread included, so the loader can't take a lock. Each
+call counts itself into an atomic in-flight counter and then reads the table pointer; an unload
+clears the pointer first and waits for the counter to reach zero before releasing anything. A call
+that finds no table does nothing: silence, no MIDI, zeros. `ProcessAudio` also produces silence on
+a loaded board before the host has chosen the host clock, since a freshly loaded board starts with
+the internal one while the host's audio thread keeps running.
+
+The firmware is halted before anything else, with the library still in place, so a firmware that
+won't halt is left running and the host can decide what to do.
 
 ## ThreadSanitizer changes signal timing
 
 ThreadSanitizer defers asynchronous signals to its own safe points and runs the deferred handlers
 with every signal blocked. Under it, interrupts don't nest and arrive a little late. Race detection
-still works. The preemption test skips its nesting check under ThreadSanitizer.
+still works. The preemption test skips its nesting check under ThreadSanitizer. ThreadSanitizer
+also keeps the shadow memory of an unloaded library resident (ld.so unmaps the library behind its
+back), so the TAPE power-cycle test only checks resident memory without it.
 
 ## Raw SDRAM and AddressSanitizer
 
-`Start` maps 64 MB at 0xC0000000 for firmware that uses raw SDRAM addresses. On x86-64 that address
-lies in AddressSanitizer's shadow gap. With `ASAN_OPTIONS=protect_shadow_gap=0` the gap is left
-unmapped and ASan counts it as ordinary memory, so daisycola maps the SDRAM and its (zeroed)
-shadow there. The TAPE boot test sets the option through `__asan_default_options`. Without it,
+`Start` maps 64 MB at 0xC0000000 for firmware that uses raw SDRAM addresses, and a power cycle
+unmaps it. On x86-64 that address lies in AddressSanitizer's shadow gap. With
+`ASAN_OPTIONS=protect_shadow_gap=0`, older ASan versions leave the gap unmapped and count it as
+ordinary memory, so daisycola maps the SDRAM and its (zeroed) shadow there. Newer ones (GCC 16)
+map the whole gap read-write themselves; daisycola then uses the range in place and empties it
+with `madvise(MADV_DONTNEED)` instead of unmapping it. The TAPE tests and the power-cycle tests
+set the option through `__asan_default_options`. Without it,
 `Start` warns and firmware that touches raw SDRAM crashes.
 
 The option belongs to the executable, not the library. ASan reads its options when the process

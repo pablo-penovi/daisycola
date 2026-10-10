@@ -1,5 +1,6 @@
 // Phase 4: TAPE, unchanged, boots headless on the firmware thread from its factory SD card.
 #include <chrono>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <thread>
 
@@ -71,11 +72,15 @@ TEST(TapeBoot, BootsFromTheFactoryCardAndRunsItsInterrupts)
 {
     BENIGN_RACE(booting);
     BENIGN_RACE(rainbow_done);
+    namespace fs = std::filesystem;
 
-    TempDir dir;
-    daisycola::SdCreateImage(dir / "card.img", 512ull << 20);
-    daisycola::SdOpenImage(dir / "card.img");
-    daisycola::SdCopyIn(DAISYCOLA_TAPE_CARD_DIR, "/");
+    // A copy of the factory card, missing a _double file. TAPE makes it again at boot.
+    TempDir        dir;
+    const fs::path card = dir.path() / "card";
+    fs::copy(DAISYCOLA_TAPE_CARD_DIR, card);
+    const uintmax_t double_size = fs::file_size(card / "cubbi_b2_double.wav");
+    fs::remove(card / "cubbi_b2_double.wav");
+    daisycola::SdInsert(card);
 
     Mp2722 charger;
     daisycola::AttachI2CDevice(0, 0x3f, &charger);
@@ -112,5 +117,6 @@ TEST(TapeBoot, BootsFromTheFactoryCardAndRunsItsInterrupts)
     EXPECT_EQ(daisycola::Ws2812Decode(frame, daisycola::ColorOrder::kRgb, leds, 32), 10u);
 
     ASSERT_TRUE(daisycola::Halt(3000));
-    EXPECT_FALSE(daisycola::SdList("/").empty()) << "the card is readable after a halt";
+    ASSERT_TRUE(fs::exists(card / "cubbi_b2_double.wav")) << "TAPE made the missing _double file";
+    EXPECT_EQ(fs::file_size(card / "cubbi_b2_double.wav"), double_size);
 }

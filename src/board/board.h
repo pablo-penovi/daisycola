@@ -36,4 +36,7 @@ void WritePin(daisy::Pin pin, bool level);
  *  Warns and carries on if the address range is taken. */
 void MapSdram();
 
+/** Unmaps the SDRAM, before a firmware library is unloaded. */
+void UnmapSdram();
+
 } // namespace daisycola::board

@@ -32,6 +32,9 @@ hardware.
 
 3. Build the host program and link the firmware library.
 
+That links the firmware into the program, which runs it once per process. To power-cycle it, build
+it as a firmware library instead (see [Power cycles](#power-cycles)).
+
 If something doesn't compile or link, see below.
 
 ## A host program
@@ -51,7 +54,7 @@ int main()
     using daisy::seed::D7, daisy::seed::D8, daisy::seed::D9;
 
     // 1. Wire the board.
-    SdOpenImage("card.img");                      // or SdCreateImage + SdCopyIn first
+    SdInsert("card");                             // a folder: the SD card's files
     static Mp2722 charger;                        // an I2CDevice
     AttachI2CDevice(0, 0x3f, &charger);
     const int keys = AttachSr4021(D8, D7, D9, 5); // five CD4021s on clock, latch, data
@@ -70,7 +73,7 @@ int main()
     // ... and from the audio thread: ProcessAudio(in, out, frames);
     // ... and from the MIDI thread: WriteMidiIn / ReadMidiOut.
 
-    // 4. Stop it before exiting, or before reading the SD card.
+    // 4. Stop it before exiting, or before using the card folder's files.
     Halt();
 }
 ```
@@ -78,8 +81,9 @@ int main()
 Things to know:
 
 - **Wiring comes first.** CD4021 chains and encoders can only be attached before `Start`.
-- **One firmware per process.** A halted firmware can't be restarted. Tests that run firmware need a
-  process each (ctest runs `gtest_discover_tests` tests that way).
+- **Linked-in firmware runs once per process.** A halted firmware can't be restarted. Tests that run
+  linked-in firmware need a process each (ctest runs `gtest_discover_tests` tests that way). A
+  firmware library can be power-cycled instead.
 - **I2C device models run on the firmware thread**, sometimes inside an interrupt. They must not
   lock, allocate or block.
 - **Audio.** With the default internal clock a timer runs the audio interrupt at the sample rate,
@@ -91,6 +95,90 @@ Things to know:
   runs on its own. `GetBoardState`, `GetIrqStats` and `GetAudioStats` show what it is doing.
 - **Firmware that uses raw SDRAM addresses** under AddressSanitizer needs
   `ASAN_OPTIONS=protect_shadow_gap=0` (see [design-notes.md](design-notes.md)).
+
+## The SD card
+
+The card is a folder on the host. `SdInsert(dir)` puts it in; the firmware's FatFs calls then act
+on the files in it, and the host can use them with its own file tools whenever the firmware is
+halted. daisycola implements FatFs's whole public API on the folder (`src/sys/ff_folder.cpp`),
+following FatFs's behaviour where a folder can show it:
+
+- names are matched without regard to case, as on FAT; new files get the name the firmware used;
+- `f_rename` never replaces an existing file, and a seek past the end of a file open for writing
+  extends it;
+- `..` can't leave the card's folder, and only drive `0:` exists;
+- `f_stat` and `f_readdir` report the size, `AM_DIR`, `AM_RDO` (no write permission) and `AM_HID`
+  (names starting with a dot), with zero timestamps;
+- `f_getfree` reports the host file system's free space in 32 KB clusters, `f_getlabel` and
+  `f_setlabel` use the folder's name, and `f_mkfs` empties the folder;
+- `f_chmod` and `f_utime` succeed and change nothing; `f_fdisk` and `f_forward` return
+  `FR_INT_ERR` and say so on stderr;
+- `disk_status(0)` reports whether the card is there. No other disk-layer function exists.
+
+A folder doesn't model FAT itself. There is no allocation, no cluster size beyond what `f_getfree`
+reports and no write left half done when the board is switched off: every write has either
+happened or not. Firmware whose behaviour depends on those can't be tested on daisycola.
+
+`SdSetPresent(false)` simulates pulling the card out without ejecting it: every FatFs call returns
+`FR_NOT_READY` until it goes back in. Deleting the folder while the firmware runs has the same
+effect, and daisycola never recreates it.
+
+The FatFs functions run on the firmware's thread, sometimes in an interrupt (TAPE streams samples
+from its timer callback), so they only use async-signal-safe system calls and fixed buffers. At
+most 64 files and 16 directories can be open at once.
+
+## Power cycles
+
+`PowerCycle()` switches the board off and on: the firmware starts again from a clean state, while
+the host's window, audio client and its own objects carry on. That needs a fresh copy of
+everything the firmware keeps in globals (its own, libDaisy's and daisycola's board), so the
+firmware is built as a shared library and loaded:
+
+```cmake
+daisycola_firmware_library(daisysp_fw)             # a static library that goes into it
+daisycola_add_firmware(my_firmware SOURCES ${FIRMWARE}/src/main.cpp ...)
+target_include_directories(my_firmware PRIVATE ${FIRMWARE}/src)
+target_link_libraries(my_firmware PRIVATE daisysp_fw)
+
+target_link_libraries(my_host PRIVATE daisycola_host)  # not daisycola
+```
+
+`daisycola_add_firmware` builds `lib<name>.so` from the firmware, the libDaisy sources and a copy
+of daisycola, with `main` renamed for daisycola. Everything in it is position-independent with
+hidden symbols, and compiled with `-fno-gnu-unique`, since GNU unique symbols (GCC's choice for
+static locals in inline functions) would keep the library loaded after `dlclose`.
+`daisycola_firmware_library` gives a static library the same flags. The library exports one
+function, which hands `daisycola_host` a table of the host API. Host code calls `host.h` as
+before:
+
+```cpp
+LoadFirmware("libmy_firmware.so");
+Wire();                     // AttachSr4021, AttachI2CDevice, SdInsert, SetAudioClock ...
+Start();                    // no argument: the library's main
+
+// later, from the same thread:
+PowerCycle();               // throws FirmwareError if it fails
+Wire();                     // the board is bare again
+Start();
+```
+
+A power cycle halts the firmware, releases what the library holds in the process (its POSIX
+timers, signal handlers, the SDRAM mapping, the card's open files, the firmware thread), unloads
+it, checks with `dlopen(RTLD_NOLOAD)` that it really is gone, and loads it again. If the firmware
+doesn't halt in time, `PowerCycle` throws and the firmware keeps running. If the library can't be
+unloaded, it throws too and refuses to load it again: firmware never runs with stale state.
+
+Rules for the host:
+
+- **No pointers into the library across a cycle.** Nothing the firmware handed out (function
+  pointers, addresses of its objects) may be kept. The host's own objects that the board points
+  to, such as `I2CDevice` models, survive: attach them again after the cycle.
+- **Wire again after every cycle.** The board, the card and the audio clock belong to the library
+  and start bare.
+- **Other host threads may keep calling.** During the cycle, and whenever no library is loaded,
+  `ProcessAudio` produces silence, MIDI moves no bytes and queries return zeros. Wiring calls,
+  `SdInsert` and `Start` abort without a library.
+- **Load, unload and power-cycle from one thread.**
 
 ## When the firmware doesn't build or link
 

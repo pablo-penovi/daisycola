@@ -288,8 +288,15 @@ void SetAudioClock(AudioClock clock)
 
 bool ProcessAudio(const float* const* in, float* const* out, size_t frames)
 {
+    // Before Start the host may still be choosing the clock: a power-cycled board starts bare
+    // while the host's audio thread carries on.
     if(clock_source.load() != AudioClock::kHost)
-        Fail("ProcessAudio needs SetAudioClock(AudioClock::kHost)");
+    {
+        if(mcu::FirmwareStarted())
+            Fail("ProcessAudio needs SetAudioClock(AudioClock::kHost)");
+        Silence(out, 0, frames);
+        return false;
+    }
     const size_t bs = block_size.load();
     if(!started.load() || !mcu::FirmwareRunning() || bs == 0)
     {

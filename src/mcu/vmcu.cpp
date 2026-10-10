@@ -8,6 +8,7 @@
 #include <ctime>
 #include <initializer_list>
 #include <pthread.h>
+#include <setjmp.h>
 #include <sys/prctl.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -66,12 +67,18 @@ std::atomic<bool>     halt_requested{false};
 std::atomic<bool>     sleeping{false};
 std::atomic<uint64_t> sleeps{0};
 std::atomic<uint64_t> wake_seq{0};
+std::atomic<bool>     thread_ended{false}; // the firmware thread returned and can be joined
+std::atomic<bool>     joined{false};
 
-pthread_t        fw_thread;
-timer_t          timers[kLineCount];
-sigset_t         irq_signals;   // every line's signal
-sigset_t         other_signals; // non-interrupt signals, blocked on the firmware thread for good
-thread_local bool on_fw_thread = false;
+pthread_t              fw_thread;
+std::atomic<pthread_t> fw_self{}; // set by the firmware thread itself
+jmp_buf                park_jmp;  // where Park returns to, in FirmwareThread
+timer_t                timers[kLineCount];
+bool                   timer_created[kLineCount];
+bool                   handlers_installed = false;
+struct sigaction       old_actions[kLineCount]; // what InstallHandlers replaced
+sigset_t               irq_signals;   // every line's signal
+sigset_t               other_signals; // non-interrupt signals, blocked on the firmware thread for good
 
 void Fail(const char* message)
 {
@@ -86,9 +93,10 @@ int SignalOf(int line)
     return SIGRTMIN + 2 + line;
 }
 
+// No thread_local: a firmware library's TLS block on a host thread would outlive dlclose.
 bool OnFirmwareThread()
 {
-    return threaded.load() && on_fw_thread;
+    return threaded.load() && pthread_equal(pthread_self(), fw_self.load());
 }
 
 // The signal mask that matches the CPU state, for a given handler level.
@@ -134,16 +142,18 @@ timespec ToTimespec(uint64_t ns)
     return {time_t(ns / 1000000000ull), long(ns % 1000000000ull)};
 }
 
-// After a halt request the firmware thread stops here for good: every interrupt masked, never
-// unwinding, so nothing the firmware was doing gets torn down under the host.
+// After a halt request the firmware stops here for good. It jumps back to FirmwareThread, with
+// every interrupt masked, and the thread ends. Nothing unwinds: no destructor in the firmware
+// runs, so nothing it was doing gets torn down under the host.
+//
+// _longjmp rather than siglongjmp: ThreadSanitizer (GCC 16, glibc 2.44) can't follow the
+// mask-saving jumps. Blocking every signal first leaves the same state siglongjmp would.
 [[noreturn]] void Park()
 {
     sigset_t all;
     sigfillset(&all);
     pthread_sigmask(SIG_SETMASK, &all, nullptr);
-    running.store(false);
-    for(;;)
-        pause();
+    _longjmp(park_jmp, 1);
 }
 
 // Halting waits for main context: an interrupt handler may be halfway through something (an SD
@@ -260,15 +270,16 @@ void InstallHandlers()
         for(int j = 0; j < kLineCount; j++)
             if(LevelMask(i) >> j & 1)
                 sigaddset(&sa.sa_mask, SignalOf(j));
-        if(sigaction(SignalOf(i), &sa, nullptr) != 0)
+        if(sigaction(SignalOf(i), &sa, &old_actions[i]) != 0)
             Fail("can't install the interrupt signal handlers");
     }
+    handlers_installed = true;
 }
 
 void* FirmwareThread(void* arg)
 {
-    Boot& boot   = *static_cast<Boot*>(arg);
-    on_fw_thread = true;
+    Boot& boot = *static_cast<Boot*>(arg);
+    fw_self.store(pthread_self());
     // Timer expiries are wanted to the nanosecond, not batched to the default 50 us slack.
     prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
 
@@ -280,6 +291,7 @@ void* FirmwareThread(void* arg)
         sev._sigev_un._tid      = gettid();
         if(timer_create(CLOCK_MONOTONIC, &sev, &timers[i]) != 0)
             Fail("can't create the interrupt timers");
+        timer_created[i] = true;
     }
     threaded.store(true);
 
@@ -301,14 +313,28 @@ void* FirmwareThread(void* arg)
             ArmTimer(i, due > now ? due - now : 1, 0);
     }
 
-    running.store(true);
-    boot.ready.store(true);
-    ApplyMask();
-    exit_code.store(boot.firmware_main());
+    // Park jumps back here with every signal blocked.
+    if(_setjmp(park_jmp) == 0)
+    {
+        running.store(true);
+        boot.ready.store(true);
+        ApplyMask();
+        exit_code.store(boot.firmware_main());
 
-    // On the chip, returning from main lands in an endless loop in the startup code.
-    exited.store(true);
-    Park();
+        // On the chip, returning from main lands in an endless loop in the startup code, and no
+        // interrupt runs any more.
+        exited.store(true);
+        for(int i = 0; i < kLineCount; i++)
+            ArmTimer(i, 0, 0);
+        sigset_t all;
+        sigfillset(&all);
+        pthread_sigmask(SIG_SETMASK, &all, nullptr);
+    }
+
+    // Halted, or main returned: the thread ends, and Halt or Shutdown joins it.
+    running.store(false);
+    thread_ended.store(true);
+    return nullptr;
 }
 
 } // namespace
@@ -332,7 +358,7 @@ void Raise(Line line)
         return;
     }
     sigval value = {};
-    if(pthread_sigqueue(fw_thread, SignalOf(int(line)), value) != 0)
+    if(thread_ended.load() || pthread_sigqueue(fw_thread, SignalOf(int(line)), value) != 0)
         lines[int(line)].dropped.fetch_add(1);
 }
 
@@ -528,7 +554,7 @@ void AdvanceClock(uint64_t ns)
 void StartFirmware(int (*firmware_main)())
 {
     if(started.exchange(true))
-        Fail("the firmware can only be started once per process");
+        Fail("the firmware can only be started once; a firmware library can be power-cycled");
     if(manual_clock.load())
         Fail("turn the manual clock off before starting the firmware");
     if(InInterrupt())
@@ -560,6 +586,16 @@ void StartFirmware(int (*firmware_main)())
     }
 }
 
+namespace
+{
+// Joins the firmware thread once it has stopped running; it returns right after.
+void JoinFirmwareThread()
+{
+    if(started.load() && !running.load() && !joined.exchange(true))
+        pthread_join(fw_thread, nullptr);
+}
+} // namespace
+
 bool FirmwareRunning()
 {
     return running.load();
@@ -585,6 +621,7 @@ bool HaltFirmware(uint32_t timeout_ms)
         const timespec ts{0, 200000};
         nanosleep(&ts, nullptr);
     }
+    JoinFirmwareThread();
     return true;
 }
 
@@ -611,6 +648,27 @@ void EnterStop()
 void Wake()
 {
     wake_seq.fetch_add(1);
+}
+
+bool Shutdown()
+{
+    if(running.load())
+        return false;
+    for(int i = 0; i < kLineCount; i++)
+        if(timer_created[i])
+        {
+            timer_delete(timers[i]);
+            timer_created[i] = false;
+        }
+    // The thread can't be in firmware code any more: it returned after parking or after main.
+    JoinFirmwareThread();
+    if(handlers_installed)
+    {
+        for(int i = 0; i < kLineCount; i++)
+            sigaction(SignalOf(i), &old_actions[i], nullptr);
+        handlers_installed = false;
+    }
+    return true;
 }
 
 FirmwareState GetFirmwareState()

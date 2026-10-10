@@ -7,6 +7,50 @@ All notable changes to daisycola are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-10
+
+The SD card is a folder on the host, and firmware built as a shared library can be power-cycled
+without restarting the host program. Breaking: the disk-image card and its helpers are gone.
+
+### Added
+
+- **Folder SD card.** `SdInsert(dir)` inserts a host folder as the card and `SdEject` removes it.
+  daisycola implements FatFs's whole public API on the folder (`src/sys/ff_folder.cpp`),
+  following FatFs's behaviour where a folder can show it: names match without regard to case, a
+  rename doesn't replace a file, `..` can't leave the folder, and the string functions convert
+  line ends. `disk_status` reports a missing card. A deleted folder reads as a pulled card
+  (`FR_NOT_READY`) and is never recreated.
+- **Power cycles.** `daisycola_add_firmware(<name> SOURCES ...)` builds firmware, libDaisy and
+  daisycola into a loadable library, and the host links `daisycola_host` instead of `daisycola`.
+  `LoadFirmware` loads it, `Start()` runs it, and `PowerCycle` halts it, releases everything it
+  holds in the process (timers, signal handlers, the SDRAM mapping, card files, its thread),
+  unloads it, checks that it's gone, and loads it again. `UnloadFirmware` does the first half.
+  Errors are `FirmwareError`s. Host calls made while no library is loaded do nothing: audio is
+  silent. `daisycola_firmware_library` prepares a static library that goes into a firmware
+  library.
+- Tests for every FatFs call on a folder, for power cycles (globals start from scratch, nothing is
+  left behind, memory stays flat, audio stays silent in between, a firmware that won't halt keeps
+  running), and TAPE power-cycled 20 times in one process.
+
+### Changed
+
+- `Halt` ends the firmware thread and joins it, rather than parking it forever. Nothing in the
+  firmware unwinds, as before.
+- `ProcessAudio` produces silence, instead of aborting, while the internal clock is still selected
+  and the firmware hasn't started: a power-cycled board starts with it while the host's audio
+  thread keeps running.
+- Under newer AddressSanitizer versions, which map the shadow gap themselves, the SDRAM at
+  0xC0000000 is used in place, without the misleading "needs protect_shadow_gap=0" warning.
+
+### Removed
+
+- The disk-image card: `SdCreateImage`, `SdOpenImage`, `SdCloseImage`, `SdList`, `SdCopyIn`,
+  `SdCopyOut`, `SdReadFile` and `SdEntry`. Use `SdInsert` with a folder, and the folder's files
+  directly once the firmware is halted.
+- FatFs itself (`ff.c` and `src/sys/ff_host.c`), its disk-driver layer (`diskio.c`,
+  `ff_gen_drv.c`, `option/ccsbcs.c`) and the block device behind it. libDaisy's `ff.h` still
+  supplies the FatFs types.
+
 ## [0.1.0] - 2026-10-10
 
 The first version: enough of libDaisy's hardware layer, backed by software, to run the CHOMPI TAPE
@@ -58,5 +102,6 @@ firmware unchanged on a Linux PC.
   a file opened wrapped to 0, so a cubbi voice's first press was silent
   ([#2](https://github.com/pablo-penovi/daisycola/pull/2)).
 
-[Unreleased]: https://github.com/pablo-penovi/daisycola/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/pablo-penovi/daisycola/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/pablo-penovi/daisycola/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/pablo-penovi/daisycola/tree/v0.1.0

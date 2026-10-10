@@ -1,18 +1,20 @@
 // Phase 4: the firmware thread. Each test runs a small libDaisy program as firmware, with real
 // interrupts, and watches it from the test's thread.
 //
-// A process can only run firmware once, so each test needs its own process. ctest runs them that
-// way; running the binary directly runs the first test and skips the rest.
+// Firmware linked into a program runs once per process, so each test needs its own process. ctest
+// runs them that way; running the binary directly runs the first test and skips the rest.
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <thread>
 #include <vector>
 
 #include "daisy_seed.h"
 #include "daisycola/host.h"
+#include "fatfs.h"
 #include "../unit/test_util.h"
 
 using namespace daisy;
@@ -38,7 +40,8 @@ class Firmware : public ::testing::Test
     }
     void TearDown() override
     {
-        if(daisycola::GetBoardState().running)
+        // Also after main returned: Halt joins the firmware thread.
+        if(daisycola::GetBoardState().started)
             EXPECT_TRUE(daisycola::Halt());
     }
 };
@@ -626,12 +629,37 @@ TEST_F(Firmware, StopModeMasksEverythingUntilWoken)
     EXPECT_TRUE(WaitFor([&] { return audio_runs.load() > before + 10; }));
 }
 
+namespace card
+{
+std::atomic<int> lines{0};
+
+// Appends a line to the card every millisecond, as TAPE writes presets and recordings.
+int Main()
+{
+    hw.Init();
+    hw.StartAudio(power::Audio);
+    static FatFSInterface fsi;
+    static FIL            log;
+    fsi.Init(FatFSInterface::Config::MEDIA_SD);
+    f_mount(&fsi.GetSDFileSystem(), fsi.GetSDPath(), 1);
+    if(f_open(&log, "log.txt", FA_OPEN_APPEND | FA_WRITE) != FR_OK)
+        return 1;
+    for(;;)
+    {
+        f_write(&log, "line\n", 5, nullptr);
+        lines.fetch_add(1);
+        System::Delay(1);
+    }
+}
+} // namespace card
+
 TEST_F(Firmware, HaltParksTheFirmwareAndFreesTheSdCard)
 {
-    daisycola::Start(power::StopMain);
-    ASSERT_TRUE(WaitFor([] { return power::stage.load() == 1; }));
-    daisycola::Wake();
-    ASSERT_TRUE(WaitFor([] { return power::stage.load() == 2; }));
+    TempDir tmp;
+    daisycola::SdInsert(tmp.path());
+    daisycola::Start(card::Main);
+    ASSERT_TRUE(WaitFor([] { return card::lines.load() > 5; }));
+    EXPECT_THROW(daisycola::SdEject(), daisycola::SdError) << "not while the firmware runs";
 
     ASSERT_TRUE(daisycola::Halt());
     const daisycola::BoardState state = daisycola::GetBoardState();
@@ -639,11 +667,15 @@ TEST_F(Firmware, HaltParksTheFirmwareAndFreesTheSdCard)
     EXPECT_FALSE(state.running);
     EXPECT_FALSE(state.exited);
     const uint64_t blocks = daisycola::GetAudioStats().blocks;
+    const int      lines  = card::lines.load();
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
     EXPECT_EQ(daisycola::GetAudioStats().blocks, blocks) << "timers stop";
+    EXPECT_EQ(card::lines.load(), lines) << "the firmware stays parked";
 
-    TempDir tmp;
-    daisycola::SdCreateImage(tmp / "card.img", 64 << 20);
+    // It parked between card calls, so the host finds whole lines in the folder.
+    EXPECT_FALSE(daisycola::SdBusy());
+    EXPECT_EQ(std::filesystem::file_size(tmp.path() / "log.txt"), uintmax_t(lines) * 5);
+    daisycola::SdEject();
 }
 
 TEST_F(Firmware, ReturningFromMainStopsTheFirmware)
