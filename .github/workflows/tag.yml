@@ -1,0 +1,53 @@
+# Tags main when VERSION.md names a version newer than every vX.Y.Z tag in the repo (or there are
+# none yet). The tag points at the pushed commit and is named exactly as in VERSION.md.
+name: Tag version
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tag-version
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compare VERSION.md with the latest tag
+        id: check
+        run: |
+          version=$(tr -d '[:space:]' < VERSION.md)
+          if ! [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=VERSION.md::'$version' isn't a version like v1.2.3"
+            exit 1
+          fi
+          latest=$(git tag --list | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if [ -z "$latest" ]; then
+            echo "No tags yet: tagging $version"
+            tag=true
+          elif [ "$version" != "$latest" ] && [ "$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -n 1)" = "$version" ]; then
+            echo "$version is newer than $latest: tagging"
+            tag=true
+          else
+            echo "$version isn't newer than $latest: nothing to tag"
+            tag=false
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the commit
+        if: steps.check.outputs.tag == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          git tag "$VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/$VERSION"
