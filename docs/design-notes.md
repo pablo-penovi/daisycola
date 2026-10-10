@@ -28,7 +28,7 @@ link error rather than a body that silently does nothing. The few bodies still l
 latch and data through `dsy_gpio`, and daisycola's CD4021 model answers on those pins: P/S high
 loads the parallel inputs, a rising clock shifts towards the data pin. The fork's debounce and edge
 code therefore runs as written; nothing is copied. The host wires a chain with `AttachSr4021` and
-sets its inputs with `SetSrInputs`. Input bit *i* is what the firmware reports as index *i*.
+sets its inputs with `SetSrInputs` (or holds them, see below). Input bit *i* is what the firmware reports as index *i*.
 
 ## Encoders step by reads and time, not by poll
 
@@ -43,6 +43,21 @@ So a state steps only once the firmware has read it in two different millisecond
 held for a dwell time (3 ms by default). The encoder's whole state, its phase, target and reads, is
 one atomic word: the host's queue and the firmware's reads update it with compare-and-swap, so reads
 stay lock-free and safe from interrupts.
+
+## Shift-register inputs can hold each level
+
+The same bursts drop key taps. The fork's CD4021 debounce counts at most one read a millisecond,
+and TAPE wants 8 of them before a key counts as pressed. With a 1024-frame host period the audio
+callback reads the keys in a burst every 21 ms, a millisecond or two of reads each, so a key has
+to be held for 100 to 170 ms to register, and anything shorter vanishes.
+
+`AttachSr4021` therefore takes an optional `hold_reads`. On such a chain each change to an input
+is queued, and the firmware sees an input's next level only once it has read the current one in
+`hold_reads` different milliseconds. Like the encoders, each input is one atomic word (level,
+reads, the millisecond of the last read, changes queued) that the host and the firmware update
+with compare-and-swap. A level nobody has read yet counts as read enough, so a change to a
+resting input shows on the next read. The host's own view, `GetSrInputs`, still has the levels
+it set. Holding is opt-in, because it delays every change behind the one before it.
 
 ## WS2812 bits: longer than half a bit is 1
 

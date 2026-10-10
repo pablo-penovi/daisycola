@@ -84,7 +84,9 @@ Things to know:
   lock, allocate or block.
 - **Audio.** With the default internal clock a timer runs the audio interrupt at the sample rate,
   and the host may `WriteAudio`/`ReadAudio`. With `AudioClock::kHost`, call `ProcessAudio` from the
-  audio thread; output lags input by two blocks.
+  audio thread; output lags input by two blocks. The firmware then reads its controls in bursts,
+  one per host period: give key chains `hold_reads` (`AttachSr4021`'s last argument) so short
+  taps still get through its debounce.
 - **Headless runs** don't need any of the host threads: with the internal audio clock the firmware
   runs on its own. `GetBoardState`, `GetIrqStats` and `GetAudioStats` show what it is doing.
 - **Firmware that uses raw SDRAM addresses** under AddressSanitizer needs
