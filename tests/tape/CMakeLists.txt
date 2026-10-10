@@ -43,3 +43,32 @@ add_executable(tape_sample_reader sample_reader_test.cpp)
 target_link_libraries(tape_sample_reader PRIVATE tape_firmware GTest::gtest_main)
 target_compile_options(tape_sample_reader PRIVATE -w)
 gtest_discover_tests(tape_sample_reader DISCOVERY_MODE PRE_TEST)
+
+# TAPE as a firmware library, power-cycled in one process. DaisySP goes in with it, built the
+# same way. tape_probe.cpp lets the test read TAPE's boot flags.
+add_library(tape_daisysp_fw STATIC ${tape_daisysp_sources})
+target_include_directories(tape_daisysp_fw PUBLIC ${TAPE}/libs/DaisySP/Source)
+foreach(dir Control Drums Dynamics Effects Filters Noise PhysicalModeling Synthesis Utility)
+    target_include_directories(tape_daisysp_fw PRIVATE ${TAPE}/libs/DaisySP/Source/${dir})
+endforeach()
+target_compile_options(tape_daisysp_fw PRIVATE -w)
+daisycola_firmware_library(tape_daisysp_fw)
+
+daisycola_add_firmware(tape_fw SOURCES
+    ${TAPE}/src/chompi_main.cpp
+    ${TAPE}/src/encoder.cpp
+    ${TAPE}/src/FileStreamingManager.cpp
+    ${TAPE}/libs/coreJSON/source/core_json.c
+    tape_probe.cpp
+)
+target_include_directories(tape_fw PRIVATE ${TAPE}/src ${TAPE}/libs/coreJSON/source/include)
+target_compile_options(tape_fw PRIVATE -w)
+target_link_libraries(tape_fw PRIVATE tape_daisysp_fw)
+
+add_executable(tape_cycle power_cycle_test.cpp)
+target_link_libraries(tape_cycle PRIVATE daisycola_host GTest::gtest_main)
+target_compile_definitions(tape_cycle PRIVATE
+    TAPE_FW="$<TARGET_FILE:tape_fw>"
+    DAISYCOLA_TAPE_CARD_DIR="${TAPE_CARD_DIR}")
+add_dependencies(tape_cycle tape_fw)
+gtest_discover_tests(tape_cycle DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 900)

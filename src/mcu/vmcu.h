@@ -91,12 +91,18 @@ void StartFirmware(int (*firmware_main)());
 /** True once the firmware thread has started, until it halts or main returns. */
 bool FirmwareRunning();
 
-/** True once StartFirmware has been called. A process runs firmware only once. */
+/** True once StartFirmware has been called. The firmware can only start once: running it again
+ *  needs a fresh copy of its code (a firmware library, power-cycled). */
 bool FirmwareStarted();
 
-/** Stops the timers and parks the firmware thread at its next delay or clock read outside an
- *  interrupt. Returns false if it didn't park within the timeout. */
+/** Stops the timers and parks the firmware at its next delay or clock read outside an
+ *  interrupt, which ends its thread. Returns false if that didn't happen within the timeout. */
 bool HaltFirmware(uint32_t timeout_ms);
+
+/** Releases what the MCU holds in the process, before a firmware library is unloaded: deletes
+ *  the timers, joins the firmware thread and puts back the signal handlers that were there before
+ *  StartFirmware. Returns false, doing nothing, while the firmware runs. */
+bool Shutdown();
 
 /** STOP mode: masks every interrupt and waits for Wake(). Without the firmware thread it returns
  *  at once, as if woken immediately. */

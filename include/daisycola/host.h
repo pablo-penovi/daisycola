@@ -2,12 +2,12 @@
  *
  * This is the only daisycola header a host program needs. The order of things:
  *
- *   1. Wire the board: CD4021 chains, encoders, I2C devices, pins, the SD card image, the audio
+ *   1. Wire the board: CD4021 chains, encoders, I2C devices, pins, the SD card folder, the audio
  *      clock. Wiring calls are only allowed before Start.
  *   2. Start the firmware. It runs on its own thread, with interrupts as on the device.
  *   3. Drive inputs and read outputs from host threads: pins, shift-register inputs, encoder
  *      detents, audio, MIDI, LED frames.
- *   4. Halt it, if the host wants to look at the SD card or exit cleanly.
+ *   4. Halt it, to look at the SD card or exit cleanly, or power-cycle it to run it again.
  *
  * Everything here is meant to be called from host threads unless it says otherwise. Calls marked
  * "from one thread" must not be made from two threads at once.
@@ -18,7 +18,6 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 #include "daisy_core.h"
 
@@ -27,17 +26,29 @@ namespace daisycola
 // ---- Firmware ----------------------------------------------------------------------------------
 //
 // Set the board up first (chips, encoders, I2C devices, the SD card, the audio clock), then start
-// the firmware. A process runs firmware once: restarting it needs a new process.
+// the firmware. There are two ways to build it in:
+//
+//   - Linked in: the firmware and the `daisycola` library are linked into the host program, and
+//     Start(main) runs it. Its state lives in the program's globals, so it runs once per process.
+//   - Loaded: the firmware is a shared library built with daisycola_add_firmware, and the host
+//     links `daisycola_host` instead. LoadFirmware loads it and Start() runs it. PowerCycle runs it
+//     again from a clean state, like switching the board off and on, while the host's own threads
+//     and objects carry on.
+//
+// Each way defines only its own Start; calling the other one fails to link.
 
 /** The firmware's main function, renamed at compile time with -Dmain=<name>. */
 using FirmwareMain = int (*)();
 
-/** Starts the firmware on its own thread and returns once it is running. */
+/** Linked in: starts the firmware on its own thread and returns once it is running. */
 void Start(FirmwareMain firmware_main);
 
-/** Stops the firmware: its timers stop and the thread parks for good at its next delay or clock
- *  read outside an interrupt handler. Returns false if that didn't happen within the timeout.
- *  Afterwards the SD-card helpers can be used again. */
+/** Loaded: starts the loaded firmware's main on its own thread and returns once it is running. */
+void Start();
+
+/** Stops the firmware: its timers stop and it parks for good at its next delay or clock read
+ *  outside an interrupt handler, which ends its thread. Returns false if that didn't happen within
+ *  the timeout. Afterwards the host can use the SD card folder. */
 bool Halt(uint32_t timeout_ms = 1000);
 
 /** Wakes the firmware from STOP mode (HAL_PWR_EnterSTOPMode), as a wake-up interrupt would. */
@@ -79,6 +90,44 @@ struct IrqStats
 };
 
 IrqStats GetIrqStats(Irq irq);
+
+// ---- Firmware libraries and power cycles -------------------------------------------------------
+//
+// With `daisycola_host`, every call in this header goes to the loaded library. The library and all
+// of its state (the firmware's globals and daisycola's board) come and go together, so after
+// LoadFirmware or PowerCycle the board is bare, as after power-up: wire it, insert the card and
+// Start again.
+//
+// While no library is loaded, or during a power cycle, calls that read or drive a running board
+// do nothing: the audio calls produce silence, the MIDI calls move no bytes and the queries return
+// zeros. Wiring the board, inserting the card and starting need a loaded library and abort
+// without one.
+//
+// Across a power cycle the host must hold no pointer into the library: no function or object
+// pointers it got from the firmware. Pointers the other way, such as the I2CDevice objects the
+// host attaches, are the host's and survive; attach them again after the cycle.
+
+/** Thrown by LoadFirmware, PowerCycle and UnloadFirmware. */
+class FirmwareError : public std::runtime_error
+{
+  public:
+    using std::runtime_error::runtime_error;
+};
+
+/** Loads a firmware library built with daisycola_add_firmware. Call from one thread, the one that
+ *  power-cycles, and only while no library is loaded. */
+void LoadFirmware(const std::string& path);
+
+/** Switches the board off and on: halts the firmware, releases everything the library holds in
+ *  the process (its timers, signal handlers, SDRAM mapping, open card files and thread), unloads
+ *  it, checks it really is gone, and loads it again. Throws FirmwareError if the firmware doesn't
+ *  halt within `halt_timeout_ms` (it keeps running then), or if the library can't be unloaded or
+ *  loaded again (no firmware is loaded then: never run firmware with stale state). Call from the
+ *  thread that loaded it. */
+void PowerCycle(uint32_t halt_timeout_ms = 1000);
+
+/** Halts the firmware and unloads its library, as the first half of PowerCycle. */
+void UnloadFirmware(uint32_t halt_timeout_ms = 1000);
 
 // ---- Pins -------------------------------------------------------------------------------------
 //
@@ -331,50 +380,32 @@ size_t ServiceInterrupts();
 
 // ---- SD card -----------------------------------------------------------------------------------
 //
-// The card is a disk-image file: an MBR with one FAT32 partition, like a real microSD card. It
-// can be loop-mounted or used with mtools. The helpers below format, fill and read the image
-// through FatFs on the calling thread. They must not run while the firmware is running.
+// The card is a folder on the host. The firmware's FatFs calls act on the files in it: names are
+// matched without regard to case, as on FAT, and only the card's own folder can be reached. FAT
+// itself isn't modelled: there is no allocation, cluster size or volume label beyond the folder's
+// name, and a write the board is switched off in the middle of has either happened or not.
+//
+// Insert and eject the card while the firmware isn't running. After Halt, the host can use the
+// folder's files directly, for example with std::filesystem.
 
-/** Thrown by the SD-card helpers. */
+/** Thrown by SdInsert and SdEject. */
 class SdError : public std::runtime_error
 {
   public:
     using std::runtime_error::runtime_error;
 };
 
-/** Creates a sparse image file of `size_bytes` and formats it as FAT32. Overwrites `path`. */
-void SdCreateImage(const std::string& path, uint64_t size_bytes);
+/** Inserts a host folder as the card: the firmware reads and writes files in it from now on. */
+void SdInsert(const std::string& dir);
 
-/** Inserts the card: the firmware reads and writes this image file from now on. */
-void SdOpenImage(const std::string& path);
+/** Removes the card. */
+void SdEject();
 
-/** Removes the card and closes the image file. */
-void SdCloseImage();
-
-/** Simulates pulling the card out (false) or putting it back (true) without closing the image. */
+/** Simulates pulling the card out (false) or putting it back (true) without ejecting it. While
+ *  it's out, every FatFs call returns FR_NOT_READY, as it does if the folder is deleted. */
 void SdSetPresent(bool present);
 
-/** True while the firmware is in the middle of a card read or write. */
+/** True while the firmware is in a card call. */
 bool SdBusy();
-
-/** One file or directory on the card. */
-struct SdEntry
-{
-    std::string name;
-    uint64_t    size;
-    bool        is_dir;
-};
-
-/** Lists a directory on the card ("/" for the root). */
-std::vector<SdEntry> SdList(const std::string& card_dir = "/");
-
-/** Copies a host file, or a host directory recursively, into a directory on the card. */
-void SdCopyIn(const std::string& host_path, const std::string& card_dir = "/");
-
-/** Copies a card file, or a card directory recursively, into a host directory. */
-void SdCopyOut(const std::string& card_path, const std::string& host_dir);
-
-/** Reads a whole file from the card. */
-std::vector<uint8_t> SdReadFile(const std::string& card_path);
 
 } // namespace daisycola

@@ -2,19 +2,21 @@
 
 #include <cstdio>
 #include <cstdlib>
-
-#include "board/sd_card.h"
+#include <cstring>
 
 using namespace daisy;
 
+// The SD card is a host folder, and FatFs's API acts on it directly (sys/ff_folder.cpp): there
+// is no disk driver to link. Drive 0 is the card, as on the device.
 FatFSInterface::Result FatFSInterface::Init(const FatFSInterface::Config& cfg)
 {
     Result ret = Result::ERR_NO_MEDIA_SELECTED;
     cfg_       = cfg;
     if(cfg_.media & Config::MEDIA_SD)
-        ret = FATFS_LinkDriver(&daisycola::sd::kDriver, path_[0]) == FR_OK
-                  ? Result::OK
-                  : Result::ERR_TOO_MANY_VOLUMES;
+    {
+        std::strcpy(path_[0], "0:/");
+        ret = Result::OK;
+    }
     if(cfg_.media & Config::MEDIA_USB)
     {
         std::fprintf(stderr, "daisycola: USB mass storage is not supported\n");
