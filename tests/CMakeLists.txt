@@ -24,6 +24,7 @@ endif()
 
 add_executable(daisycola_unit
     unit/i2c_test.cpp
+    unit/ff_size_test.cpp
     unit/sd_card_test.cpp
     unit/ws2812_test.cpp
 )
