@@ -160,11 +160,91 @@ uint64_t NowUs()
 
 // ---- CD4021 chains ------------------------------------------------------------------------------
 
+// One input of a chain with `hold_reads`: the level the firmware sees and the changes queued
+// behind it. The next change shows once the firmware has read the level in `hold_reads` different
+// milliseconds. Levels alternate, so a count of changes is enough. One atomic word, as for
+// encoders: the host queues and the firmware reads with compare-and-swap.
+struct HeldInput
+{
+    std::atomic<uint64_t> state{0}; // level:1 | reads:5 | read_ms:14 | pending:16
+
+    static constexpr uint64_t kMsMask     = (1ull << 14) - 1;
+    static constexpr int      kMaxReads   = 31;
+    static constexpr int      kMaxPending = 0xffff;
+
+    struct State
+    {
+        bool     level;
+        int      reads;   // reads of the level in different milliseconds, up to hold_reads
+        uint64_t read_ms; // the millisecond of the last read, low 14 bits
+        int      pending; // changes queued behind the level
+    };
+
+    static uint64_t Pack(const State& st)
+    {
+        return uint64_t(st.level) << 35 | uint64_t(st.reads) << 30 | (st.read_ms & kMsMask) << 16
+               | uint64_t(st.pending);
+    }
+
+    static State Unpack(uint64_t s)
+    {
+        return {bool(s >> 35 & 1), int(s >> 30 & 31), s >> 16 & kMsMask, int(s & 0xffff)};
+    }
+
+    // A level the firmware hasn't read yet counts as read enough: it has been there all along.
+    void Reset(bool level, int hold_reads, uint64_t now_ms)
+    {
+        state.store(Pack({level, hold_reads, (now_ms - 1) & kMsMask, 0}));
+    }
+
+    void Queue()
+    {
+        uint64_t s = state.load();
+        for(;;)
+        {
+            State st = Unpack(s);
+            // Dropping a press and its release keeps the levels in step.
+            st.pending = st.pending < kMaxPending ? st.pending + 1 : st.pending - 1;
+            if(state.compare_exchange_weak(s, Pack(st)))
+                return;
+        }
+    }
+
+    // The firmware reads the input: counts the read, moves on to the next level if it's due, and
+    // returns the level the input shows.
+    bool Read(int hold_reads, uint64_t now_ms)
+    {
+        uint64_t s = state.load(std::memory_order_acquire);
+        for(;;)
+        {
+            State          st = Unpack(s);
+            const uint64_t ms = now_ms & kMsMask;
+            if(ms == st.read_ms)
+                return st.level; // counted already
+            st.read_ms = ms;
+            if(st.pending > 0 && st.reads >= hold_reads)
+            {
+                st.level = !st.level;
+                st.pending--;
+                st.reads = 1; // this read sees the new level
+            }
+            else if(st.reads < hold_reads)
+                st.reads++;
+            if(state.compare_exchange_weak(s, Pack(st), std::memory_order_acq_rel))
+                return st.level;
+        }
+    }
+
+    int Pending() const { return Unpack(state.load(std::memory_order_acquire)).pending; }
+};
+
 struct Chain
 {
     daisy::Pin            clk, latch, data;
     int                   chips;
+    int                   hold_reads = 0;
     std::atomic<uint64_t> inputs{~0ull};
+    HeldInput             held[64];
 
     // Shift-register state. Only the MCU thread touches it.
     uint64_t reg       = 0;
@@ -183,9 +263,19 @@ struct Chain
 
     uint64_t Mask() const { return chips == 8 ? ~0ull : (1ull << (8 * chips)) - 1; }
 
-    uint64_t ParallelInputs() const
+    int Bits() const { return 8 * chips; }
+
+    uint64_t ParallelInputs()
     {
-        uint64_t  v = inputs.load(std::memory_order_acquire);
+        uint64_t v = 0;
+        if(hold_reads > 0)
+        {
+            const uint64_t now_ms = NowUs() / 1000;
+            for(int i = 0; i < Bits(); i++)
+                v |= uint64_t(held[i].Read(hold_reads, now_ms)) << i;
+        }
+        else
+            v = inputs.load(std::memory_order_acquire);
         const int n = overlay_count.load(std::memory_order_acquire);
         if(n > 0)
         {
@@ -200,6 +290,17 @@ struct Chain
             }
         }
         return v & Mask();
+    }
+
+    // The host changed these inputs: queue a change on each, if they're held.
+    void Changed(uint64_t bits)
+    {
+        if(hold_reads == 0)
+            return;
+        bits &= Mask();
+        for(int i = 0; i < Bits(); i++)
+            if(bits >> i & 1)
+                held[i].Queue();
     }
 
     // P/S high loads the parallel inputs (asynchronously, for as long as it stays high).
@@ -311,11 +412,13 @@ uint32_t GetPinChanges(daisy::Pin pin)
     return s ? s->changes.load() : 0;
 }
 
-int AttachSr4021(daisy::Pin clk, daisy::Pin latch, daisy::Pin data, int chips)
+int AttachSr4021(daisy::Pin clk, daisy::Pin latch, daisy::Pin data, int chips, int hold_reads)
 {
     CheckWiring();
     if(chips < 1 || chips > 8)
         Fail("a CD4021 chain has 1 to 8 chips");
+    if(hold_reads < 0 || hold_reads > HeldInput::kMaxReads)
+        Fail("a CD4021 chain holds its inputs for 0 to 31 reads");
     PinSlot *sc = Slot(clk), *sl = Slot(latch), *sd = Slot(data);
     if(!sc || !sl || !sd)
         Fail("CD4021 chain on an invalid pin");
@@ -323,10 +426,13 @@ int AttachSr4021(daisy::Pin clk, daisy::Pin latch, daisy::Pin data, int chips)
     if(id >= kMaxChains)
         Fail("too many CD4021 chains");
     Chain& c = chains[id];
-    c.clk    = clk;
-    c.latch  = latch;
-    c.data   = data;
-    c.chips  = chips;
+    c.clk        = clk;
+    c.latch      = latch;
+    c.data       = data;
+    c.chips      = chips;
+    c.hold_reads = hold_reads;
+    for(HeldInput& h : c.held)
+        h.Reset(true, hold_reads, NowUs() / 1000);
     // ShiftRegister4021 can run parallel chains off one clock and latch. CHOMPI doesn't, so
     // daisycola supports one chain per clock and latch pin for now.
     if(sc->clk_of.load() || sl->latch_of.load())
@@ -340,21 +446,31 @@ int AttachSr4021(daisy::Pin clk, daisy::Pin latch, daisy::Pin data, int chips)
 
 void SetSrInputs(int chain, uint64_t levels)
 {
-    GetChain(chain).inputs.store(levels, std::memory_order_release);
+    Chain& c = GetChain(chain);
+    c.Changed(c.inputs.exchange(levels, std::memory_order_acq_rel) ^ levels);
 }
 
 void SetSrInput(int chain, int bit, bool level)
 {
-    Chain& c = GetChain(chain);
-    if(level)
-        c.inputs.fetch_or(1ull << bit);
-    else
-        c.inputs.fetch_and(~(1ull << bit));
+    Chain&         c    = GetChain(chain);
+    const uint64_t mask = 1ull << bit;
+    const uint64_t old  = level ? c.inputs.fetch_or(mask) : c.inputs.fetch_and(~mask);
+    c.Changed((old ^ (level ? mask : 0)) & mask);
 }
 
 uint64_t GetSrInputs(int chain)
 {
     return GetChain(chain).inputs.load();
+}
+
+int PendingSrChanges(int chain)
+{
+    Chain& c     = GetChain(chain);
+    int    total = 0;
+    if(c.hold_reads > 0)
+        for(int i = 0; i < c.Bits(); i++)
+            total += c.held[i].Pending();
+    return total;
 }
 
 namespace

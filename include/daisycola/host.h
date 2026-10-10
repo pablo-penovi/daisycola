@@ -106,9 +106,17 @@ uint32_t GetPinChanges(daisy::Pin pin);
 // Input bit 8*k + (n-1) is parallel input Pn of chip k. Chips are counted from the start of the
 // chain, the chip farthest from the MCU; the last chip drives the data pin. With this numbering,
 // bit i is what ShiftRegister4021 reports as index i. All inputs start high.
+//
+// A firmware that debounces by the millisecond can miss a short press when its reads come in
+// bursts (audio blocks run back to back on the host's audio thread). With `hold_reads`, each
+// change to an input waits its turn: the firmware sees an input's next level only once it has
+// read the current one in `hold_reads` different milliseconds. A tap then always reaches the
+// firmware, later than it happened if the reads are far apart.
 
-/** Wires a chain of `chips` CD4021s (1 to 8) to the pins. Returns the chain's id. */
-int AttachSr4021(daisy::Pin clk, daisy::Pin latch, daisy::Pin data, int chips);
+/** Wires a chain of `chips` CD4021s (1 to 8) to the pins. Returns the chain's id. `hold_reads`
+ *  (0 to 31) holds each input level for that many reads in different milliseconds; 0 shows
+ *  every change at once. */
+int AttachSr4021(daisy::Pin clk, daisy::Pin latch, daisy::Pin data, int chips, int hold_reads = 0);
 
 /** Sets the levels on all of a chain's parallel inputs. */
 void SetSrInputs(int chain, uint64_t levels);
@@ -116,8 +124,13 @@ void SetSrInputs(int chain, uint64_t levels);
 /** Sets one parallel input. */
 void SetSrInput(int chain, int bit, bool level);
 
-/** The levels last set on a chain's inputs. */
+/** The levels last set on a chain's inputs. With `hold_reads`, the firmware may not see them
+ *  yet. */
 uint64_t GetSrInputs(int chain);
+
+/** Changes to a chain's inputs that are held back, waiting for the firmware to read the levels
+ *  before them. Always 0 without `hold_reads`. */
+int PendingSrChanges(int chain);
 
 // ---- Quadrature encoders -----------------------------------------------------------------------
 //

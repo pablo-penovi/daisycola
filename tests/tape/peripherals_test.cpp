@@ -126,6 +126,87 @@ TEST_F(Tape, Sr4021DebounceAndEdgesMatchTheForksLogic)
     EXPECT_GT(falls, 50);
 }
 
+TEST_F(Tape, Sr4021HeldInputShowsEachLevelForItsReads)
+{
+    const int chain = daisycola::AttachSr4021(seed::D8, seed::D7, seed::D9, 5, 4);
+    ShiftRegister4021<5, 1>         sr;
+    ShiftRegister4021<5, 1>::Config cfg;
+    cfg.clk      = seed::D8;
+    cfg.latch    = seed::D7;
+    cfg.data[0]  = seed::D9;
+    cfg.dbc_size = 7;
+    sr.Init(cfg);
+
+    // A tap between two reads: the press shows at once, then holds for four reads in different
+    // milliseconds; a second read in the same millisecond doesn't count.
+    daisycola::AdvanceClock(1000 - System::GetUs() % 1000 + 100);
+    daisycola::SetSrInput(chain, 12, false);
+    daisycola::SetSrInput(chain, 12, true);
+    EXPECT_EQ(daisycola::GetSrInputs(chain), ~0ull);
+    EXPECT_EQ(daisycola::PendingSrChanges(chain), 2);
+    for(int ms = 0; ms < 4; ms++)
+    {
+        sr.Update();
+        EXPECT_FALSE(sr.RawState(12)) << "read " << ms;
+        EXPECT_EQ(daisycola::PendingSrChanges(chain), 1);
+        daisycola::AdvanceClock(200);
+        sr.Update();
+        EXPECT_FALSE(sr.RawState(12)) << "second read in ms " << ms;
+        daisycola::AdvanceClock(800);
+    }
+    sr.Update();
+    EXPECT_TRUE(sr.RawState(12));
+    EXPECT_EQ(daisycola::PendingSrChanges(chain), 0);
+
+    // Setting a level an input already has queues nothing; the other inputs never moved.
+    daisycola::SetSrInputs(chain, ~0ull);
+    EXPECT_EQ(daisycola::PendingSrChanges(chain), 0);
+    for(int i = 0; i < 40; i++)
+        EXPECT_TRUE(sr.RawState(i)) << "input " << i;
+}
+
+TEST_F(Tape, Sr4021HeldInputsReachTheDebounceInBursts)
+{
+    // With the host's audio clock, TAPE's audio callback runs a host period's 0.5 ms blocks back to
+    // back. Its debounce counts at most one read a millisecond and wants 8 for a press, so a tap
+    // between two periods would never show. Held for 10 reads, every tap makes one press and one
+    // release, however far apart the reads.
+    const int chain = daisycola::AttachSr4021(seed::D8, seed::D7, seed::D9, 5, 10);
+    ShiftRegister4021<5, 1>         sr;
+    ShiftRegister4021<5, 1>::Config cfg;
+    cfg.clk      = seed::D8;
+    cfg.latch    = seed::D7;
+    cfg.data[0]  = seed::D9;
+    cfg.dbc_size = 7;
+    sr.Init(cfg);
+    constexpr int kKey = 16;
+
+    for(uint32_t period_us : {500u, 2667u, 5333u, 21333u})
+    {
+        int rises = 0, falls = 0;
+        for(int p = 0; p < 600; p++)
+        {
+            if(p % 20 == 0 && p < 100)
+            {
+                daisycola::SetSrInput(chain, kKey, false);
+                daisycola::SetSrInput(chain, kKey, true);
+            }
+            const uint32_t blocks = period_us / 500;
+            for(uint32_t i = 0; i < blocks; i++)
+            {
+                sr.Update();
+                rises += sr.RisingEdge(kKey);
+                falls += sr.FallingEdge(kKey);
+                daisycola::AdvanceClock(20);
+            }
+            daisycola::AdvanceClock(period_us - 20 * blocks);
+        }
+        EXPECT_EQ(rises, 5) << "period " << period_us << " us";
+        EXPECT_EQ(falls, 5) << "period " << period_us << " us";
+        EXPECT_EQ(daisycola::PendingSrChanges(chain), 0);
+    }
+}
+
 // ---- Encoders -----------------------------------------------------------------------------------
 
 namespace
