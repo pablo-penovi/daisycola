@@ -80,6 +80,8 @@ const abi::FirmwareApi kApi = {
     StartLoaded,
     Halt,
     Wake,
+    SetMinMainDelay,
+    SetFirmwarePriority,
     GetBoardState,
     GetIrqStats,
     Shutdown,

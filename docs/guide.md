@@ -91,6 +91,14 @@ Things to know:
   audio thread; output lags input by two blocks. The firmware then reads its controls in bursts,
   one per host period: give key chains `hold_reads` (`AttachSr4021`'s last argument) so short
   taps still get through its debounce.
+- **Real-time audio hosts.** Once the firmware has started, give it the audio thread's priority
+  with `SetFirmwarePriority`: `ProcessAudio` waits on the firmware thread, which otherwise runs
+  under the normal scheduler. Both settings below belong to the board, so set them again after a
+  power cycle.
+- **Busy main loops.** A firmware whose main loop delays a few microseconds per pass keeps the
+  firmware thread waking tens of thousands of times a second. `SetMinMainDelay` makes such delays
+  longer (TAPE: 250 us cuts its idle CPU by about 60%) without delaying interrupts. Leave it at 0
+  where a loop counts its passes to measure time and that matters.
 - **Headless runs** don't need any of the host threads: with the internal audio clock the firmware
   runs on its own. `GetBoardState`, `GetIrqStats` and `GetAudioStats` show what it is doing.
 - **Firmware that uses raw SDRAM addresses** under AddressSanitizer needs

@@ -7,6 +7,30 @@ All notable changes to daisycola are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-11
+
+Less CPU for a running firmware, and a firmware thread that can keep up with a real-time audio
+thread.
+
+### Added
+
+- `SetMinMainDelay(us)`: delays the firmware takes outside an interrupt handler last at least this
+  long. TAPE's main loop waits 10 µs per pass, which woke the firmware thread about 60,000 times a
+  second; with 250 µs an idle TAPE uses about 60% less CPU. Interrupts still run on time. Off by
+  default.
+- `SetFirmwarePriority(priority)`: runs the firmware thread, and its interrupt handlers, under
+  `SCHED_FIFO`. A host calling `ProcessAudio` from a real-time audio thread should give the
+  firmware that thread's priority, so the audio thread no longer waits on a normal-priority
+  thread.
+
+### Changed
+
+- With the host audio clock, the audio interrupt wakes the host's audio thread once, after the
+  blocks it was handed, instead of after every block.
+- A top-level build without `CMAKE_BUILD_TYPE` is a Release build. Unoptimised, TAPE's audio took
+  about 2.4 times the CPU.
+- The firmware library table is version 2: libraries and hosts must both come from this version.
+
 ## [0.2.0] - 2026-10-10
 
 The SD card is a folder on the host, and firmware built as a shared library can be power-cycled
@@ -102,6 +126,7 @@ firmware unchanged on a Linux PC.
   a file opened wrapped to 0, so a cubbi voice's first press was silent
   ([#2](https://github.com/pablo-penovi/daisycola/pull/2)).
 
-[Unreleased]: https://github.com/pablo-penovi/daisycola/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/pablo-penovi/daisycola/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/pablo-penovi/daisycola/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/pablo-penovi/daisycola/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/pablo-penovi/daisycola/tree/v0.1.0

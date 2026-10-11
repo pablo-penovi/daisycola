@@ -54,6 +54,23 @@ bool Halt(uint32_t timeout_ms = 1000);
 /** Wakes the firmware from STOP mode (HAL_PWR_EnterSTOPMode), as a wake-up interrupt would. */
 void Wake();
 
+/** Makes every delay the firmware takes outside an interrupt handler last at least
+ *  `microseconds`; 0, the default, keeps delays as asked. A main loop that delays a few
+ *  microseconds per pass (TAPE's waits 10 us) otherwise wakes the firmware thread tens of
+ *  thousands of times a second, which costs the host a good part of a core. Interrupts still run
+ *  on time, but a loop that counts its passes to measure time runs slower. Any time, from any
+ *  thread; set it again after a power cycle. */
+void SetMinMainDelay(uint32_t microseconds);
+
+/** Runs the firmware thread, and with it every interrupt handler, under SCHED_FIFO at `priority`
+ *  (1 to 99); 0 puts it back under the normal scheduler, where it starts. A host that calls
+ *  ProcessAudio from a real-time audio thread should give the firmware that thread's priority:
+ *  otherwise the audio thread waits on a thread that any busy program can hold up. Call after
+ *  Start, and again after a power cycle. Returns false, changing nothing, if the firmware isn't
+ *  running or the system refuses (it needs an RLIMIT_RTPRIO of at least `priority`, as audio users
+ *  usually have). */
+bool SetFirmwarePriority(int priority);
+
 struct BoardState
 {
     bool     started;   // Start was called

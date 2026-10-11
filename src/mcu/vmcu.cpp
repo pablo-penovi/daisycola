@@ -8,6 +8,7 @@
 #include <ctime>
 #include <initializer_list>
 #include <pthread.h>
+#include <sched.h>
 #include <setjmp.h>
 #include <sys/prctl.h>
 #include <ucontext.h>
@@ -55,6 +56,7 @@ std::atomic<uint32_t> level{0}; // lines masked by the priority of the running h
 
 std::atomic<bool>     manual_clock{false};
 std::atomic<uint64_t> manual_now{0};
+std::atomic<uint64_t> min_main_delay_ns{0};
 
 // ---- Firmware thread state ----------------------------------------------------------------------
 
@@ -72,6 +74,7 @@ std::atomic<bool>     joined{false};
 
 pthread_t              fw_thread;
 std::atomic<pthread_t> fw_self{}; // set by the firmware thread itself
+std::atomic<pid_t>     fw_tid{0};  // its kernel id while it runs, for SetFirmwarePriority
 jmp_buf                park_jmp;  // where Park returns to, in FirmwareThread
 timer_t                timers[kLineCount];
 bool                   timer_created[kLineCount];
@@ -280,6 +283,7 @@ void* FirmwareThread(void* arg)
 {
     Boot& boot = *static_cast<Boot*>(arg);
     fw_self.store(pthread_self());
+    fw_tid.store(gettid());
     // Timer expiries are wanted to the nanosecond, not batched to the default 50 us slack.
     prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
 
@@ -332,6 +336,7 @@ void* FirmwareThread(void* arg)
     }
 
     // Halted, or main returned: the thread ends, and Halt or Shutdown joins it.
+    fw_tid.store(0);
     running.store(false);
     thread_ended.store(true);
     return nullptr;
@@ -482,6 +487,15 @@ void SleepUntil(uint64_t t_ns)
     if(threaded.load())
     {
         CheckHalt();
+        // A main loop that delays a few microseconds per pass would otherwise wake the thread tens
+        // of thousands of times a second. Interrupts still cut the longer sleep short.
+        const uint64_t min = min_main_delay_ns.load(std::memory_order_relaxed);
+        if(min != 0 && depth.load() == 0 && OnFirmwareThread())
+        {
+            const uint64_t earliest = NowNs() + min;
+            if(t_ns < earliest)
+                t_ns = earliest;
+        }
         SleepThreaded(t_ns);
         return;
     }
@@ -551,6 +565,11 @@ void AdvanceClock(uint64_t ns)
     SleepUntil(NowNs() + ns);
 }
 
+void SetMinMainDelay(uint64_t min_ns)
+{
+    min_main_delay_ns.store(min_ns, std::memory_order_relaxed);
+}
+
 void StartFirmware(int (*firmware_main)())
 {
     if(started.exchange(true))
@@ -599,6 +618,18 @@ void JoinFirmwareThread()
 bool FirmwareRunning()
 {
     return running.load();
+}
+
+// By kernel thread id rather than pthread_t: the thread may end and be joined meanwhile, and a
+// gone id fails with ESRCH where a joined pthread_t would be undefined.
+bool SetFirmwarePriority(int priority)
+{
+    const pid_t tid = fw_tid.load();
+    if(tid == 0 || priority < 0 || priority > sched_get_priority_max(SCHED_FIFO))
+        return false;
+    sched_param param{};
+    param.sched_priority = priority;
+    return sched_setscheduler(tid, priority > 0 ? SCHED_FIFO : SCHED_OTHER, &param) == 0;
 }
 
 bool FirmwareStarted()

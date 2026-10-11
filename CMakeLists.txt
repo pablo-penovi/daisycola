@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.20)
 project(daisycola LANGUAGES C CXX)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Without a build type nothing is optimised, and firmware DSP built that way takes over twice the
+# CPU. A project that adds daisycola as a subdirectory chooses its own.
+if(PROJECT_IS_TOP_LEVEL AND NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (default Release)" FORCE)
+endif()
+
 # --- Where libDaisy (and, for tests, the CHOMPI firmware) live -----------------------------------
 
 set(DAISYCOLA_CHOMPI_DIR "" CACHE PATH

@@ -79,6 +79,10 @@ void UseManualClock(bool manual);
 /** Moves the manual clock forward and runs the interrupts that became due on the way. */
 void AdvanceClock(uint64_t ns);
 
+/** Makes every delay on the firmware thread outside an interrupt handler last at least min_ns; 0,
+ *  the default, keeps delays as asked. Callable from any thread. */
+void SetMinMainDelay(uint64_t min_ns);
+
 /** Runs pending and due interrupts on the calling thread, highest priority first, until none
  *  are left. Only for when the firmware thread is not running. Returns how many ran. */
 size_t ServiceInterrupts();
@@ -90,6 +94,10 @@ void StartFirmware(int (*firmware_main)());
 
 /** True once the firmware thread has started, until it halts or main returns. */
 bool FirmwareRunning();
+
+/** Puts the running firmware thread under SCHED_FIFO at `priority` (1 to 99), or back under the
+ *  normal scheduler with 0. Returns false if the firmware isn't running or the system refuses. */
+bool SetFirmwarePriority(int priority);
 
 /** True once StartFirmware has been called. The firmware can only start once: running it again
  *  needs a fresh copy of its code (a firmware library, power-cycled). */

@@ -16,7 +16,7 @@ namespace daisycola::abi
 {
 // Bumped whenever the table changes. Both sides are built from the same sources, so a mismatch
 // means a library from another daisycola build.
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 2;
 
 struct FirmwareApi
 {
@@ -27,6 +27,8 @@ struct FirmwareApi
     void (*start)();
     bool (*halt)(uint32_t timeout_ms);
     void (*wake)();
+    void (*set_min_main_delay)(uint32_t microseconds);
+    bool (*set_firmware_priority)(int priority);
     BoardState (*get_board_state)();
     IrqStats (*get_irq_stats)(Irq irq);
 

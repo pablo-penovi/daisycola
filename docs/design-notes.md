@@ -121,6 +121,16 @@ merge (ThreadSanitizer merges them), so daisycola's own handlers drain everythin
 than one item per raise. Delays sleep with `clock_nanosleep`; a signal cuts the sleep short, its
 handler runs, and the sleep resumes. The thread's timer slack is 1 ns.
 
+TAPE's main loop ends each pass with a 10 µs delay, so the thread woke about 60,000 times a second
+and the sleeps alone took most of the CPU an idle TAPE used. `SetMinMainDelay` lets the host set a
+minimum for delays outside a handler. It stretches the delay where it starts rather than each sleep
+in it: an interrupt that cuts the sleep short doesn't restart the minimum. Handlers' own delays are
+left alone.
+
+The firmware thread starts under the normal scheduler. `SetFirmwarePriority` moves it to
+`SCHED_FIFO`, by kernel thread id rather than `pthread_t`, so a call that races a halt fails with
+`ESRCH` instead of touching a joined thread.
+
 The plan kept a fallback (one lock and an interrupt-runner thread) in case signals proved
 unworkable. They didn't, so it doesn't exist.
 
@@ -247,7 +257,9 @@ means an unused channel.
 
 Two clocks can raise the interrupt. The internal clock is a timer at the block rate, which is what
 headless runs use. With the host clock, the host's audio thread calls `ProcessAudio`; it raises
-the interrupt once for every full block and waits (bounded) for the output. The output ring starts
+the interrupt once for every full block and waits (bounded) for the output. The handler runs every
+block the host has handed over and then posts the host's semaphore once, so the audio thread wakes
+once per period rather than once per block. The output ring starts
 with two blocks of silence, so host buffers that aren't a multiple of the block size always find
 enough output.
 
