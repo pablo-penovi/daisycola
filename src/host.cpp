@@ -22,6 +22,16 @@ void Wake()
     mcu::Wake();
 }
 
+void SetMinMainDelay(uint32_t microseconds)
+{
+    mcu::SetMinMainDelay(uint64_t(microseconds) * 1000);
+}
+
+bool SetFirmwarePriority(int priority)
+{
+    return mcu::SetFirmwarePriority(priority);
+}
+
 BoardState GetBoardState()
 {
     const mcu::FirmwareState s = mcu::GetFirmwareState();

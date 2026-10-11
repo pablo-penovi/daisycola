@@ -49,7 +49,8 @@ std::atomic<uint64_t> blocks{0};
 std::atomic<uint64_t> underruns{0};
 std::atomic<uint64_t> overruns{0};
 
-// Posted once per processed block with the host clock; sem_post is async-signal-safe.
+// Posted with the host clock once an interrupt has processed the blocks it found; sem_post is
+// async-signal-safe.
 struct BlockSemaphore
 {
     sem_t sem;
@@ -144,13 +145,17 @@ class AudioHandle::Impl
             self.ProcessBlock();
             return;
         }
-        // The host may have handed over several blocks per raise, or raises may have merged.
+        // The host may have handed over several blocks per raise, or raises may have merged. The
+        // host waits for all of them, so it's woken once, not once per block.
+        bool ran = false;
         while(processed.load() < requested.load())
         {
             self.ProcessBlock();
             processed.fetch_add(1);
-            sem_post(&block_done.sem);
+            ran = true;
         }
+        if(ran)
+            sem_post(&block_done.sem);
     }
 };
 

@@ -193,6 +193,18 @@ void Wake()
         c->wake();
 }
 
+void SetMinMainDelay(uint32_t microseconds)
+{
+    Call c;
+    Need(c, "SetMinMainDelay").set_min_main_delay(microseconds);
+}
+
+bool SetFirmwarePriority(int priority)
+{
+    Call c;
+    return c && c->set_firmware_priority(priority);
+}
+
 BoardState GetBoardState()
 {
     Call c;

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <sys/resource.h>
 #include <thread>
 #include <vector>
 
@@ -684,4 +685,89 @@ TEST_F(Firmware, ReturningFromMainStopsTheFirmware)
     ASSERT_TRUE(WaitFor([] { return daisycola::GetBoardState().exited; }));
     EXPECT_EQ(daisycola::GetBoardState().exit_code, 7);
     EXPECT_TRUE(WaitFor([] { return !daisycola::GetBoardState().running; }));
+}
+
+// ---- Host settings for the firmware thread ------------------------------------------------------
+
+namespace pacing
+{
+std::atomic<uint64_t> passes{0};
+std::atomic<uint64_t> ticks{0};
+std::atomic<uint64_t> longest_isr_delay_us{0};
+
+uint64_t SteadyUs()
+{
+    return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count());
+}
+
+// A delay in a handler, which the minimum doesn't stretch.
+void Tick(void*)
+{
+    const uint64_t t0 = SteadyUs();
+    System::DelayUs(10);
+    const uint64_t took = SteadyUs() - t0;
+    if(took > longest_isr_delay_us.load())
+        longest_isr_delay_us.store(took);
+    ticks.fetch_add(1);
+}
+
+int Main()
+{
+    TimerHandle tim5;
+    StartTim5(tim5, 1000, Tick);
+    for(;;)
+    {
+        System::DelayUs(10);
+        passes.fetch_add(1);
+    }
+}
+
+int IdleMain()
+{
+    Idle();
+    return 0;
+}
+} // namespace pacing
+
+TEST_F(Firmware, MinMainDelayStretchesMainLoopDelaysOnly)
+{
+    daisycola::SetMinMainDelay(2000);
+    daisycola::Start(pacing::Main);
+    ASSERT_TRUE(WaitFor([] { return pacing::ticks.load() > 10; }));
+
+    uint64_t passes = pacing::passes.load(), ticks = pacing::ticks.load();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    passes = pacing::passes.load() - passes;
+    ticks  = pacing::ticks.load() - ticks;
+    EXPECT_LE(passes, 160u) << "each 10 us delay in main lasts 2 ms";
+    EXPECT_GE(passes, 50u);
+    EXPECT_GE(ticks, 200u) << "the 1 kHz timer keeps its rate";
+    EXPECT_LT(pacing::longest_isr_delay_us.load(), 1000u) << "delays in a handler aren't stretched";
+
+    daisycola::SetMinMainDelay(0);
+    passes = pacing::passes.load();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_GT(pacing::passes.load() - passes, 500u) << "0 keeps delays as asked";
+}
+
+TEST_F(Firmware, FirmwarePriorityAppliesToTheRunningFirmware)
+{
+    EXPECT_FALSE(daisycola::SetFirmwarePriority(0)) << "not before Start";
+    daisycola::Start(pacing::IdleMain);
+    EXPECT_TRUE(daisycola::SetFirmwarePriority(0));
+    EXPECT_FALSE(daisycola::SetFirmwarePriority(-1));
+    EXPECT_FALSE(daisycola::SetFirmwarePriority(100));
+
+    // SCHED_FIFO needs RLIMIT_RTPRIO (or CAP_SYS_NICE), which a test machine may not grant.
+    rlimit limit{};
+    if(getrlimit(RLIMIT_RTPRIO, &limit) == 0 && limit.rlim_cur >= 1)
+    {
+        EXPECT_TRUE(daisycola::SetFirmwarePriority(1));
+        EXPECT_TRUE(daisycola::SetFirmwarePriority(0));
+    }
+
+    ASSERT_TRUE(daisycola::Halt());
+    EXPECT_FALSE(daisycola::SetFirmwarePriority(0)) << "not once it has halted";
 }

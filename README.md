@@ -62,6 +62,9 @@ cmake --build build
 ctest --test-dir build
 ```
 
+A build without `CMAKE_BUILD_TYPE` is a Release build; pass `-DCMAKE_BUILD_TYPE=Debug` for
+debugging.
+
 Otherwise point CMake at the trees with `-DDAISYCOLA_CHOMPI_DIR=...` or
 `-DDAISYCOLA_LIBDAISY_DIR=...`. Add `-DDAISYCOLA_SANITIZER=thread` or `address` for a sanitizer
 build.
